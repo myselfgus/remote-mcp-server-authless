@@ -56,7 +56,7 @@ Se você REALMENTE precisa de Cloudflare Access para outros endpoints, configure
 2. Edite as políticas
 3. Adicione política "Bypass" para path `/sse*`
 
-Mas isso derrota o propósito de ter autenticação no MCP Server.
+Mas isso remove a proteção de autenticação especificamente do endpoint /sse*, que é o ponto de entrada principal para clientes MCP.
 
 ### Opção 3: Service Tokens (Complexo)
 
