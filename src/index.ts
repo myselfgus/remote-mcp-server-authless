@@ -74,8 +74,69 @@ export class MetaMCP extends McpAgent {
 		version: "1.0.0",
 	});
 
-	// In-memory storage for server configurations (in production, use Durable Objects storage)
+	// In-memory storage for server configurations (persisted to KV)
 	private servers: Map<string, MCPServerConfig> = new Map();
+
+	// Static environment storage for access across instances
+	private static globalEnv?: Env;
+
+	// Environment bindings for persistence
+	private env?: Env;
+
+	// Static method to set global env
+	static setGlobalEnv(env: Env) {
+		MetaMCP.globalEnv = env;
+	}
+
+	// Initialize with environment bindings
+	constructor() {
+		super();
+		// Use global env if available
+		this.env = MetaMCP.globalEnv;
+	}
+
+	// Load state from KV storage
+	private async loadState(): Promise<void> {
+		if (!this.env?.MCP_KV) {
+			console.warn("MCP_KV not available, using in-memory storage only");
+			return;
+		}
+
+		try {
+			const serversData = await this.env.MCP_KV.get("mcp:servers", "json");
+			if (serversData && typeof serversData === "object") {
+				this.servers = new Map(Object.entries(serversData as Record<string, MCPServerConfig>));
+				console.log(`Loaded ${this.servers.size} servers from KV storage`);
+			}
+		} catch (error) {
+			console.error("Failed to load state from KV:", error);
+		}
+	}
+
+	// Save state to KV storage
+	private async saveState(): Promise<void> {
+		if (!this.env?.MCP_KV) {
+			console.warn("MCP_KV not available, state not persisted");
+			return;
+		}
+
+		try {
+			const serversData = Object.fromEntries(this.servers.entries());
+			await this.env.MCP_KV.put("mcp:servers", JSON.stringify(serversData));
+			console.log(`Saved ${this.servers.size} servers to KV storage`);
+
+			// Also save analytics about storage operations
+			if (this.env.MCP_ANALYTICS) {
+				this.env.MCP_ANALYTICS.writeDataPoint({
+					blobs: ["state_save", "kv"],
+					doubles: [this.servers.size, Date.now()],
+					indexes: ["meta-mcp"]
+				});
+			}
+		} catch (error) {
+			console.error("Failed to save state to KV:", error);
+		}
+	}
 
 	async init() {
 		// Tool 1: Create a new MCP server
@@ -87,6 +148,9 @@ export class MetaMCP extends McpAgent {
 				description: z.string().describe("Description of what the MCP server does"),
 			},
 			async ({ name, version, description }) => {
+				// Load state from storage
+				await this.loadState();
+
 				// Validate name format
 				const nameRegex = /^[a-z0-9-]+$/;
 				if (!nameRegex.test(name)) {
@@ -131,6 +195,9 @@ export class MetaMCP extends McpAgent {
 
 				this.servers.set(serverId, config);
 
+				// Persist state to storage
+				await this.saveState();
+
 				return {
 					content: [
 						{
@@ -161,6 +228,9 @@ export class MetaMCP extends McpAgent {
 					),
 			},
 			async ({ serverId, toolName, description, parameters, implementation }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -194,6 +264,9 @@ export class MetaMCP extends McpAgent {
 				config.updatedAt = Date.now();
 				this.servers.set(serverId, config);
 
+				// Persist state to storage
+				await this.saveState();
+
 				return {
 					content: [
 						{
@@ -219,6 +292,9 @@ export class MetaMCP extends McpAgent {
 					.describe("JavaScript code to generate the resource content (returns string)"),
 			},
 			async ({ serverId, uri, name, description, mimeType, implementation }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -252,6 +328,9 @@ export class MetaMCP extends McpAgent {
 
 				config.updatedAt = Date.now();
 				this.servers.set(serverId, config);
+
+				// Persist state to storage
+				await this.saveState();
 
 				return {
 					content: [
@@ -288,6 +367,9 @@ export class MetaMCP extends McpAgent {
 					),
 			},
 			async ({ serverId, promptName, description, arguments: args, template }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -320,6 +402,9 @@ export class MetaMCP extends McpAgent {
 				config.updatedAt = Date.now();
 				this.servers.set(serverId, config);
 
+				// Persist state to storage
+				await this.saveState();
+
 				return {
 					content: [
 						{
@@ -341,6 +426,9 @@ export class MetaMCP extends McpAgent {
 				compatibilityDate: z.string().optional().describe("Compatibility date"),
 			},
 			async ({ serverId, routes, vars, compatibilityDate }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -359,6 +447,9 @@ export class MetaMCP extends McpAgent {
 
 				config.updatedAt = Date.now();
 				this.servers.set(serverId, config);
+
+				// Persist state to storage
+				await this.saveState();
 
 				return {
 					content: [
@@ -382,6 +473,9 @@ export class MetaMCP extends McpAgent {
 					.describe("Which file to generate: index.ts, wrangler.jsonc, package.json, or all"),
 			},
 			async ({ serverId, fileType }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -431,6 +525,9 @@ export class MetaMCP extends McpAgent {
 			"list_mcp_servers",
 			{},
 			async () => {
+				// Load state from storage
+				await this.loadState();
+
 				if (this.servers.size === 0) {
 					return {
 						content: [
@@ -467,6 +564,9 @@ export class MetaMCP extends McpAgent {
 				serverId: z.string().describe("ID of the MCP server to delete"),
 			},
 			async ({ serverId }) => {
+				// Load state from storage
+				await this.loadState();
+
 				if (!this.servers.has(serverId)) {
 					return {
 						content: [
@@ -479,6 +579,9 @@ export class MetaMCP extends McpAgent {
 				}
 
 				this.servers.delete(serverId);
+
+				// Persist state to storage
+				await this.saveState();
 
 				return {
 					content: [
@@ -498,6 +601,9 @@ export class MetaMCP extends McpAgent {
 				serverId: z.string().describe("ID of the MCP server"),
 			},
 			async ({ serverId }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -551,6 +657,9 @@ ${JSON.stringify(config.wranglerConfig, null, 2)}
 				serverId: z.string().describe("ID of the MCP server"),
 			},
 			async ({ serverId }) => {
+				// Load state from storage
+				await this.loadState();
+
 				const config = this.servers.get(serverId);
 				if (!config) {
 					return {
@@ -858,6 +967,9 @@ export default {
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+		// Initialize global env for MetaMCP instances
+		MetaMCP.setGlobalEnv(env);
+
 		// CORS headers for all responses
 		const corsHeaders = {
 			"Access-Control-Allow-Origin": "*",
