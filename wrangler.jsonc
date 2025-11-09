@@ -25,6 +25,39 @@
 			}
 		]
 	},
+	"kv_namespaces": [
+		{
+			"binding": "MCP_KV",
+			"id": "preview_id",
+			"preview_id": "preview_id"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "MCP_DB",
+			"database_name": "mcp-database",
+			"database_id": "preview_id",
+			"preview_database_id": "preview_id"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "MCP_BUCKET",
+			"bucket_name": "mcp-storage",
+			"preview_bucket_name": "mcp-storage-preview"
+		}
+	],
+	"analytics_engine_datasets": [
+		{
+			"binding": "MCP_ANALYTICS"
+		}
+	],
+	"vectorize": [
+		{
+			"binding": "MCP_VECTORIZE",
+			"index_name": "mcp-vectors"
+		}
+	],
 	"observability": {
 		"enabled": true
 	}
