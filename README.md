@@ -121,18 +121,21 @@ Este servidor está protegido por **Cloudflare Access** para garantir que apenas
 
 ### Configuração do Cloudflare Access
 
-**Aplicação:** meta-mcp
-**Application ID:** `a1715203-d8fe-467f-b1b1-054ecb21aa52`
-**Audience (AUD):** `4100b1ca3725d093f0381e0538014ba14ff62e5ba6488d2861271be6b91bb7d2`
+**Domínio protegido:** `meta-mcp.voither.workers.dev`
+**Audience (AUD):** `c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c`
+**URL JWKs:** `https://voither.cloudflareaccess.com/cdn-cgi/access/certs`
 
-### Variável de Ambiente
+**Acesso permitido:** Somente usuários da conta Cloudflare VOITHER
 
-Apenas uma variável é necessária:
+### Variáveis de Ambiente
 
 ```bash
 # Habilitar/desabilitar autenticação
 CF_ACCESS_ENABLED=true  # Produção (padrão)
 CF_ACCESS_ENABLED=false # Desenvolvimento local
+
+# Audience (AUD) tag da aplicação Cloudflare Access
+CF_ACCESS_AUD=c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c
 ```
 
 ### Desenvolvimento Local
@@ -142,18 +145,21 @@ Para desenvolvimento local, a autenticação está **desabilitada por padrão** 
 ```bash
 # .dev.vars
 CF_ACCESS_ENABLED=false
+CF_ACCESS_AUD=c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c
 ```
 
 ### Como Funciona
 
 1. **Cloudflare Access** valida o JWT **antes** da requisição chegar no Worker
-2. Se autenticado, adiciona headers: `CF-Access-Authenticated-User-Email` e `CF-Access-JWT-Assertion`
-3. Worker verifica se os headers estão presentes (validação instantânea <1ms)
-4. Não há verificação de assinatura ou busca de chaves - Cloudflare já fez isso!
+2. Se autenticado, adiciona o JWT nos headers: `CF-Access-JWT-Assertion` e cookie `CF_Authorization`
+3. Worker decodifica o JWT (sem verificar assinatura - Cloudflare já fez isso!)
+4. Worker valida o claim **AUD** para garantir que é da aplicação correta
+5. Worker verifica se o JWT não expirou
 
 **Vantagens:**
-- ⚡ Performance máxima (sem validação duplicada)
-- 🔒 Segurança mantida (Cloudflare valida JWT)
+- ⚡ Performance otimizada (decodificação rápida, sem verificação de assinatura)
+- 🔒 Segurança garantida (Cloudflare valida assinatura JWT com JWKs)
+- ✅ Validação de AUD garante que é a aplicação correta
 - 🚀 Sem timeouts ou travas de conexão
 
 ### Gerenciar Políticas

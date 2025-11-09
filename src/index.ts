@@ -3,10 +3,28 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 // Cloudflare Access authentication
-// Note: Cloudflare Access validates the JWT BEFORE the request reaches the Worker
-// We just need to check if the authentication headers are present
+// Cloudflare Access validates the JWT BEFORE the request reaches the Worker
+// We validate the AUD claim to ensure it's our application
 interface CloudflareAccessConfig {
 	enabled: boolean;
+	aud: string; // Application Audience (AUD) tag
+}
+
+// Decode JWT without verification (Cloudflare Access already verified it)
+function decodeJWT(token: string): any {
+	try {
+		const parts = token.split('.');
+		if (parts.length !== 3) {
+			return null;
+		}
+		// Decode the payload (second part)
+		const payload = parts[1];
+		// Base64 URL decode
+		const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+		return JSON.parse(decoded);
+	} catch (e) {
+		return null;
+	}
 }
 
 async function validateCloudflareAccess(
@@ -17,13 +35,12 @@ async function validateCloudflareAccess(
 		return null; // Auth disabled
 	}
 
-	// Cloudflare Access adds these headers after successful authentication
-	const userEmail = request.headers.get("CF-Access-Authenticated-User-Email");
-	const jwtAssertion = request.headers.get("CF-Access-JWT-Assertion");
+	// Get JWT from cookie or header
+	const jwtAssertion = request.headers.get("CF-Access-JWT-Assertion") ||
+	                     getCookieValue(request.headers.get("Cookie") || "", "CF_Authorization");
 
-	// Check if user is authenticated
-	if (!userEmail && !jwtAssertion) {
-		return new Response("Unauthorized: Please authenticate via Cloudflare Access", {
+	if (!jwtAssertion) {
+		return new Response("Unauthorized: No Cloudflare Access JWT found", {
 			status: 401,
 			headers: {
 				"Content-Type": "text/plain",
@@ -31,10 +48,21 @@ async function validateCloudflareAccess(
 		});
 	}
 
-	// Verify it's the authorized user (1@voither.com)
-	if (userEmail && userEmail !== "1@voither.com") {
+	// Decode and validate JWT
+	const payload = decodeJWT(jwtAssertion);
+	if (!payload) {
+		return new Response("Unauthorized: Invalid JWT format", {
+			status: 401,
+			headers: {
+				"Content-Type": "text/plain",
+			},
+		});
+	}
+
+	// Validate AUD claim
+	if (payload.aud !== config.aud && !payload.aud?.includes(config.aud)) {
 		return new Response(
-			`Unauthorized: User '${userEmail}' is not authorized. Only 1@voither.com is allowed.`,
+			`Unauthorized: Invalid audience. Expected ${config.aud}, got ${payload.aud}`,
 			{
 				status: 403,
 				headers: {
@@ -44,8 +72,25 @@ async function validateCloudflareAccess(
 		);
 	}
 
+	// Check expiration
+	const now = Math.floor(Date.now() / 1000);
+	if (payload.exp && payload.exp < now) {
+		return new Response("Unauthorized: JWT has expired", {
+			status: 401,
+			headers: {
+				"Content-Type": "text/plain",
+			},
+		});
+	}
+
 	// User is authenticated and authorized
 	return null;
+}
+
+// Helper function to extract cookie value
+function getCookieValue(cookieHeader: string, name: string): string | null {
+	const match = cookieHeader.match(new RegExp(`(^|;)\\s*${name}\\s*=\\s*([^;]+)`));
+	return match ? match[2] : null;
 }
 
 // Storage interface for MCP server configurations
@@ -959,6 +1004,7 @@ export default {
 			// Cloudflare Access configuration
 			const accessConfig: CloudflareAccessConfig = {
 				enabled: env.CF_ACCESS_ENABLED !== "false", // Default to enabled
+				aud: env.CF_ACCESS_AUD || "c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c",
 			};
 
 			// Validate Cloudflare Access (skip for health/root endpoints)
