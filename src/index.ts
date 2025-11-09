@@ -2,6 +2,177 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+// Cloudflare Access JWT validation
+interface CloudflareAccessConfig {
+	teamDomain: string; // e.g., "voither.cloudflareaccess.com"
+	audience: string; // Application Audience (AUD) tag
+}
+
+interface JWKKey {
+	kid: string;
+	kty: string;
+	alg: string;
+	use?: string;
+	n: string;
+	e: string;
+}
+
+interface JWKSResponse {
+	keys: JWKKey[];
+	public_cert?: { kid: string; cert: string };
+	public_certs?: Array<{ kid: string; cert: string }>;
+}
+
+// Cache for JWKs to avoid fetching on every request
+let jwksCache: { keys: JWKKey[]; timestamp: number } | null = null;
+const JWKS_CACHE_TTL = 3600000; // 1 hour
+
+async function getJWKS(teamDomain: string): Promise<JWKKey[]> {
+	// Check cache
+	if (jwksCache && Date.now() - jwksCache.timestamp < JWKS_CACHE_TTL) {
+		return jwksCache.keys;
+	}
+
+	const certsUrl = `https://${teamDomain}/cdn-cgi/access/certs`;
+	const response = await fetch(certsUrl);
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch JWKS: ${response.status}`);
+	}
+
+	const jwks: JWKSResponse = await response.json();
+
+	// Cache the keys
+	jwksCache = {
+		keys: jwks.keys,
+		timestamp: Date.now(),
+	};
+
+	return jwks.keys;
+}
+
+function base64UrlDecode(str: string): Uint8Array {
+	// Replace URL-safe characters and add padding
+	str = str.replace(/-/g, "+").replace(/_/g, "/");
+	while (str.length % 4) {
+		str += "=";
+	}
+
+	const binary = atob(str);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) {
+		bytes[i] = binary.charCodeAt(i);
+	}
+	return bytes;
+}
+
+async function verifyJWT(token: string, config: CloudflareAccessConfig): Promise<boolean> {
+	try {
+		// Parse JWT
+		const parts = token.split(".");
+		if (parts.length !== 3) {
+			return false;
+		}
+
+		const [headerB64, payloadB64, signatureB64] = parts;
+
+		// Decode header and payload
+		const header = JSON.parse(new TextDecoder().decode(base64UrlDecode(headerB64)));
+		const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(payloadB64)));
+
+		// Verify audience
+		if (payload.aud !== config.audience && !payload.aud?.includes(config.audience)) {
+			console.error("Invalid audience:", payload.aud);
+			return false;
+		}
+
+		// Verify expiration
+		if (payload.exp && payload.exp < Date.now() / 1000) {
+			console.error("Token expired");
+			return false;
+		}
+
+		// Get JWKs
+		const keys = await getJWKS(config.teamDomain);
+
+		// Find the key matching the token's kid
+		const key = keys.find((k) => k.kid === header.kid);
+		if (!key) {
+			console.error("Key not found for kid:", header.kid);
+			return false;
+		}
+
+		// Import the public key
+		const nBytes = base64UrlDecode(key.n);
+		const eBytes = base64UrlDecode(key.e);
+
+		const cryptoKey = await crypto.subtle.importKey(
+			"jwk",
+			{
+				kty: key.kty,
+				n: key.n,
+				e: key.e,
+				alg: key.alg || "RS256",
+				ext: true,
+			},
+			{
+				name: "RSASSA-PKCS1-v1_5",
+				hash: "SHA-256",
+			},
+			false,
+			["verify"],
+		);
+
+		// Verify signature
+		const signatureBytes = base64UrlDecode(signatureB64);
+		const dataBytes = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+
+		const isValid = await crypto.subtle.verify(
+			"RSASSA-PKCS1-v1_5",
+			cryptoKey,
+			signatureBytes,
+			dataBytes,
+		);
+
+		return isValid;
+	} catch (error) {
+		console.error("JWT verification error:", error);
+		return false;
+	}
+}
+
+async function validateCloudflareAccess(
+	request: Request,
+	config: CloudflareAccessConfig,
+): Promise<Response | null> {
+	// Get the JWT from the CF-Access-JWT-Assertion header
+	const token = request.headers.get("CF-Access-JWT-Assertion");
+
+	if (!token) {
+		return new Response("Unauthorized: No CF-Access-JWT-Assertion header", {
+			status: 401,
+			headers: {
+				"Content-Type": "text/plain",
+			},
+		});
+	}
+
+	// Verify the JWT
+	const isValid = await verifyJWT(token, config);
+
+	if (!isValid) {
+		return new Response("Unauthorized: Invalid JWT token", {
+			status: 401,
+			headers: {
+				"Content-Type": "text/plain",
+			},
+		});
+	}
+
+	// Token is valid, allow the request to proceed
+	return null;
+}
+
 // Storage interface for MCP server configurations
 interface MCPServerConfig {
 	name: string;
@@ -835,17 +1006,134 @@ export default {
 }
 
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
+	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
 
+		// CORS headers for all responses
+		const corsHeaders = {
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type, Authorization, CF-Access-JWT-Assertion",
+			"Access-Control-Max-Age": "86400",
+		};
+
+		// Handle OPTIONS preflight requests
+		if (request.method === "OPTIONS") {
+			return new Response(null, {
+				status: 204,
+				headers: corsHeaders,
+			});
+		}
+
+		// Health check endpoint (no auth required)
+		if (url.pathname === "/health" || url.pathname === "/ping") {
+			return new Response(
+				JSON.stringify({
+					status: "ok",
+					server: "MCP Remote Server Builder",
+					version: "1.0.0",
+					timestamp: new Date().toISOString(),
+				}),
+				{
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						...corsHeaders,
+					},
+				},
+			);
+		}
+
+		// Root endpoint with server info (no auth required)
+		if (url.pathname === "/") {
+			return new Response(
+				JSON.stringify(
+					{
+						name: "MCP Remote Server Builder",
+						version: "1.0.0",
+						description:
+							"Meta-MCP Server for creating and deploying MCP Remote Servers",
+						endpoints: {
+							sse: "/sse (Server-Sent Events transport)",
+							mcp: "/mcp (HTTP POST transport)",
+							health: "/health (Health check)",
+							message: "/sse/message (SSE message endpoint)",
+						},
+						documentation: "https://github.com/myselfgus/remote-mcp-server-authless",
+						authentication: env.CF_ACCESS_ENABLED !== "false" ? "enabled" : "disabled",
+						usage: {
+							claude_desktop:
+								'Add to config: { "command": "npx", "args": ["mcp-remote", "URL/sse"] }',
+							direct_connection: "Connect to /sse endpoint for Server-Sent Events",
+						},
+					},
+					null,
+					2,
+				),
+				{
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						...corsHeaders,
+					},
+				},
+			);
+		}
+
+		// Cloudflare Access configuration
+		const accessConfig: CloudflareAccessConfig = {
+			teamDomain: env.CF_ACCESS_TEAM_DOMAIN || "voither.cloudflareaccess.com",
+			audience:
+				env.CF_ACCESS_AUDIENCE ||
+				"0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
+		};
+
+		// Enable/disable authentication
+		const authEnabled = env.CF_ACCESS_ENABLED !== "false"; // Default to enabled
+
+		// Validate Cloudflare Access JWT if enabled (skip for health/root endpoints)
+		if (authEnabled) {
+			const authError = await validateCloudflareAccess(request, accessConfig);
+			if (authError) {
+				return authError;
+			}
+		}
+
+		// Process MCP requests with CORS
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			return MetaMCP.serveSSE("/sse").fetch(request, env, ctx);
+			const response = await MetaMCP.serveSSE("/sse").fetch(request, env, ctx);
+			// Add CORS headers to SSE response
+			const newHeaders = new Headers(response.headers);
+			Object.entries(corsHeaders).forEach(([key, value]) => {
+				newHeaders.set(key, value);
+			});
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: newHeaders,
+			});
 		}
 
 		if (url.pathname === "/mcp") {
-			return MetaMCP.serve("/mcp").fetch(request, env, ctx);
+			const response = await MetaMCP.serve("/mcp").fetch(request, env, ctx);
+			// Add CORS headers to MCP response
+			const newHeaders = new Headers(response.headers);
+			Object.entries(corsHeaders).forEach(([key, value]) => {
+				newHeaders.set(key, value);
+			});
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: newHeaders,
+			});
 		}
 
-		return new Response("Not found", { status: 404 });
+		return new Response("Not found", {
+			status: 404,
+			headers: {
+				"Content-Type": "text/plain",
+				...corsHeaders,
+			},
+		});
 	},
 };
