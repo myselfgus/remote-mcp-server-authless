@@ -8,7 +8,7 @@ BRANCH_NAME="new-branch-from-45ef83c"
 
 # Verify that the commit exists
 echo "Verifying commit ${COMMIT}..."
-if ! git rev-parse --verify "${COMMIT}^{commit}" >/dev/null 2>&1; then
+if ! git rev-parse --verify "${COMMIT}" >/dev/null 2>&1; then
     echo "Error: Commit ${COMMIT} does not exist in this repository"
     exit 1
 fi
