@@ -115,59 +115,39 @@ curl http://localhost:8787/
 
 Para instruções detalhadas, soluções de problemas e mais opções, veja [test-connection.md](test-connection.md).
 
-## Segurança e Autenticação
+## ⚠️ Segurança e Autenticação
 
-Este servidor está protegido por **Cloudflare Access** para garantir que apenas usuários autorizados possam acessar as ferramentas MCP.
+Este servidor **NÃO tem autenticação** por design.
 
-### Configuração do Cloudflare Access
+### Por que sem autenticação?
 
-**Domínio protegido:** `meta-mcp.voither.workers.dev`
-**Audience (AUD):** `c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c`
-**URL JWKs:** `https://voither.cloudflareaccess.com/cdn-cgi/access/certs`
+Este é um **MCP Remote Server "authless"** (sem autenticação) porque:
 
-**Acesso permitido:** Somente usuários da conta Cloudflare VOITHER
+1. **Compatibilidade com MCP Remote**: Cloudflare Access e outras soluções OAuth não funcionam com conexões SSE do protocolo MCP
+2. **Clientes MCP não suportam OAuth**: Claude.ai, Playground e outros clientes fazem conexões SSE diretas e não conseguem abrir páginas de login
+3. **Problema técnico**: Autenticação OAuth trava eternamente em "Authenticating..." porque não há callback/redirect
 
-### Variáveis de Ambiente
+### ⚠️ Importante sobre Cloudflare Access
 
-```bash
-# Habilitar/desabilitar autenticação
-CF_ACCESS_ENABLED=true  # Produção (padrão)
-CF_ACCESS_ENABLED=false # Desenvolvimento local
+Se você configurou **Cloudflare Access** no dashboard, você DEVE desabilitá-lo:
 
-# Audience (AUD) tag da aplicação Cloudflare Access
-CF_ACCESS_AUD=c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c
-```
+1. Acesse https://one.dash.cloudflare.com/
+2. **Access** > **Applications**
+3. Encontre aplicação para `meta-mcp.voither.workers.dev`
+4. Delete ou desabilite a aplicação
 
-### Desenvolvimento Local
+**Cloudflare Access impede que clientes MCP conectem!** Veja `CLOUDFLARE_ACCESS_INCOMPATIBILITY.md` para detalhes.
 
-Para desenvolvimento local, a autenticação está **desabilitada por padrão** em `.dev.vars`:
+### 🔒 Como adicionar segurança (se necessário)
 
-```bash
-# .dev.vars
-CF_ACCESS_ENABLED=false
-CF_ACCESS_AUD=c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c
-```
+Se você precisa de autenticação, opções compatíveis com MCP:
 
-### Como Funciona
+1. **API Keys customizadas**: Implemente validação de header `Authorization: Bearer <token>` no código do Worker
+2. **Cloudflare WAF**: Use regras de firewall para restringir por IP/país
+3. **Rate Limiting**: Limite requisições para prevenir abuso
+4. **Private Network**: Use Cloudflare Tunnel para acesso apenas via VPN
 
-1. **Cloudflare Access** valida o JWT **antes** da requisição chegar no Worker
-2. Se autenticado, adiciona o JWT nos headers: `CF-Access-JWT-Assertion` e cookie `CF_Authorization`
-3. Worker decodifica o JWT (sem verificar assinatura - Cloudflare já fez isso!)
-4. Worker valida o claim **AUD** para garantir que é da aplicação correta
-5. Worker verifica se o JWT não expirou
-
-**Vantagens:**
-- ⚡ Performance otimizada (decodificação rápida, sem verificação de assinatura)
-- 🔒 Segurança garantida (Cloudflare valida assinatura JWT com JWKs)
-- ✅ Validação de AUD garante que é a aplicação correta
-- 🚀 Sem timeouts ou travas de conexão
-
-### Gerenciar Políticas
-
-Para gerenciar quem pode acessar:
-1. [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
-2. **Access** > **Applications** > **meta-mcp**
-3. Configure políticas de acesso
+**Não use:** Cloudflare Access, OAuth, ou qualquer solução que exija redirects/popups
 
 ## Ferramentas Disponíveis
 

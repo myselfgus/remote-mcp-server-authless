@@ -9,7 +9,7 @@
 	"compatibility_date": "2025-03-10",
 	"compatibility_flags": ["nodejs_compat"],
 	"vars": {
-		"CF_ACCESS_ENABLED": "true"
+		"CF_ACCESS_ENABLED": "false"
 	},
 	"migrations": [
 		{
