@@ -21,18 +21,31 @@ async function validateCloudflareAccess(
 	const userEmail = request.headers.get("CF-Access-Authenticated-User-Email");
 	const jwtAssertion = request.headers.get("CF-Access-JWT-Assertion");
 
-	// If Cloudflare Access headers are present, user is already authenticated
-	if (userEmail || jwtAssertion) {
-		return null; // User is authenticated by Cloudflare Access
+	// Check if user is authenticated
+	if (!userEmail && !jwtAssertion) {
+		return new Response("Unauthorized: Please authenticate via Cloudflare Access", {
+			status: 401,
+			headers: {
+				"Content-Type": "text/plain",
+			},
+		});
 	}
 
-	// No authentication headers - user not authenticated
-	return new Response("Unauthorized: Please authenticate via Cloudflare Access", {
-		status: 401,
-		headers: {
-			"Content-Type": "text/plain",
-		},
-	});
+	// Verify it's the authorized user (1@voither.com)
+	if (userEmail && userEmail !== "1@voither.com") {
+		return new Response(
+			`Unauthorized: User '${userEmail}' is not authorized. Only 1@voither.com is allowed.`,
+			{
+				status: 403,
+				headers: {
+					"Content-Type": "text/plain",
+				},
+			},
+		);
+	}
+
+	// User is authenticated and authorized
+	return null;
 }
 
 // Storage interface for MCP server configurations
