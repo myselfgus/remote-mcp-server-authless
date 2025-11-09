@@ -23,16 +23,7 @@ interface JWKSResponse {
 	public_certs?: Array<{ kid: string; cert: string }>;
 }
 
-// Cache for JWKs to avoid fetching on every request
-let jwksCache: { keys: JWKKey[]; timestamp: number } | null = null;
-const JWKS_CACHE_TTL = 3600000; // 1 hour
-
 async function getJWKS(teamDomain: string): Promise<JWKKey[]> {
-	// Check cache
-	if (jwksCache && Date.now() - jwksCache.timestamp < JWKS_CACHE_TTL) {
-		return jwksCache.keys;
-	}
-
 	const certsUrl = `https://${teamDomain}/cdn-cgi/access/certs`;
 	const response = await fetch(certsUrl);
 
@@ -41,13 +32,6 @@ async function getJWKS(teamDomain: string): Promise<JWKKey[]> {
 	}
 
 	const jwks: JWKSResponse = await response.json();
-
-	// Cache the keys
-	jwksCache = {
-		keys: jwks.keys,
-		timestamp: Date.now(),
-	};
-
 	return jwks.keys;
 }
 
@@ -103,9 +87,6 @@ async function verifyJWT(token: string, config: CloudflareAccessConfig): Promise
 		}
 
 		// Import the public key
-		const nBytes = base64UrlDecode(key.n);
-		const eBytes = base64UrlDecode(key.e);
-
 		const cryptoKey = await crypto.subtle.importKey(
 			"jwk",
 			{
@@ -1007,8 +988,6 @@ export default {
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		const url = new URL(request.url);
-
 		// CORS headers for all responses
 		const corsHeaders = {
 			"Access-Control-Allow-Origin": "*",
@@ -1017,25 +996,142 @@ export default {
 			"Access-Control-Max-Age": "86400",
 		};
 
-		// Handle OPTIONS preflight requests
-		if (request.method === "OPTIONS") {
-			return new Response(null, {
-				status: 204,
-				headers: corsHeaders,
-			});
-		}
+		try {
+			const url = new URL(request.url);
 
-		// Health check endpoint (no auth required)
-		if (url.pathname === "/health" || url.pathname === "/ping") {
+			// Handle OPTIONS preflight requests
+			if (request.method === "OPTIONS") {
+				return new Response(null, {
+					status: 204,
+					headers: corsHeaders,
+				});
+			}
+
+			// Health check endpoint (no auth required)
+			if (url.pathname === "/health" || url.pathname === "/ping") {
+				return new Response(
+					JSON.stringify({
+						status: "ok",
+						server: "MCP Remote Server Builder",
+						version: "1.0.0",
+						timestamp: new Date().toISOString(),
+					}),
+					{
+						status: 200,
+						headers: {
+							"Content-Type": "application/json",
+							...corsHeaders,
+						},
+					},
+				);
+			}
+
+			// Root endpoint with server info (no auth required)
+			if (url.pathname === "/") {
+				return new Response(
+					JSON.stringify(
+						{
+							name: "MCP Remote Server Builder",
+							version: "1.0.0",
+							description:
+								"Meta-MCP Server for creating and deploying MCP Remote Servers",
+							endpoints: {
+								sse: "/sse (Server-Sent Events transport)",
+								mcp: "/mcp (HTTP POST transport)",
+								health: "/health (Health check)",
+								message: "/sse/message (SSE message endpoint)",
+							},
+							documentation: "https://github.com/myselfgus/remote-mcp-server-authless",
+							authentication: env.CF_ACCESS_ENABLED !== "false" ? "enabled" : "disabled",
+							usage: {
+								claude_desktop:
+									'Add to config: { "command": "npx", "args": ["mcp-remote", "URL/sse"] }',
+								direct_connection: "Connect to /sse endpoint for Server-Sent Events",
+							},
+						},
+						null,
+						2,
+					),
+					{
+						status: 200,
+						headers: {
+							"Content-Type": "application/json",
+							...corsHeaders,
+						},
+					},
+				);
+			}
+
+			// Cloudflare Access configuration
+			const accessConfig: CloudflareAccessConfig = {
+				teamDomain: env.CF_ACCESS_TEAM_DOMAIN || "voither.cloudflareaccess.com",
+				audience:
+					env.CF_ACCESS_AUDIENCE ||
+					"0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
+			};
+
+			// Enable/disable authentication
+			const authEnabled = env.CF_ACCESS_ENABLED !== "false"; // Default to enabled
+
+			// Validate Cloudflare Access JWT if enabled (skip for health/root endpoints)
+			if (authEnabled) {
+				try {
+					const authError = await validateCloudflareAccess(request, accessConfig);
+					if (authError) {
+						return authError;
+					}
+				} catch (authErr) {
+					console.error("Auth validation error:", authErr);
+					// Continue without auth if validation fails
+				}
+			}
+
+			// Process MCP requests with CORS
+			if (url.pathname === "/sse" || url.pathname === "/sse/message") {
+				const response = await MetaMCP.serveSSE("/sse").fetch(request, env, ctx);
+				// Add CORS headers to SSE response
+				const newHeaders = new Headers(response.headers);
+				Object.entries(corsHeaders).forEach(([key, value]) => {
+					newHeaders.set(key, value);
+				});
+				return new Response(response.body, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: newHeaders,
+				});
+			}
+
+			if (url.pathname === "/mcp") {
+				const response = await MetaMCP.serve("/mcp").fetch(request, env, ctx);
+				// Add CORS headers to MCP response
+				const newHeaders = new Headers(response.headers);
+				Object.entries(corsHeaders).forEach(([key, value]) => {
+					newHeaders.set(key, value);
+				});
+				return new Response(response.body, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: newHeaders,
+				});
+			}
+
+			return new Response("Not found", {
+				status: 404,
+				headers: {
+					"Content-Type": "text/plain",
+					...corsHeaders,
+				},
+			});
+		} catch (error) {
+			console.error("Worker error:", error);
 			return new Response(
 				JSON.stringify({
-					status: "ok",
-					server: "MCP Remote Server Builder",
-					version: "1.0.0",
+					error: "Internal server error",
+					message: error instanceof Error ? error.message : String(error),
 					timestamp: new Date().toISOString(),
 				}),
 				{
-					status: 200,
+					status: 500,
 					headers: {
 						"Content-Type": "application/json",
 						...corsHeaders,
@@ -1043,97 +1139,5 @@ export default {
 				},
 			);
 		}
-
-		// Root endpoint with server info (no auth required)
-		if (url.pathname === "/") {
-			return new Response(
-				JSON.stringify(
-					{
-						name: "MCP Remote Server Builder",
-						version: "1.0.0",
-						description:
-							"Meta-MCP Server for creating and deploying MCP Remote Servers",
-						endpoints: {
-							sse: "/sse (Server-Sent Events transport)",
-							mcp: "/mcp (HTTP POST transport)",
-							health: "/health (Health check)",
-							message: "/sse/message (SSE message endpoint)",
-						},
-						documentation: "https://github.com/myselfgus/remote-mcp-server-authless",
-						authentication: env.CF_ACCESS_ENABLED !== "false" ? "enabled" : "disabled",
-						usage: {
-							claude_desktop:
-								'Add to config: { "command": "npx", "args": ["mcp-remote", "URL/sse"] }',
-							direct_connection: "Connect to /sse endpoint for Server-Sent Events",
-						},
-					},
-					null,
-					2,
-				),
-				{
-					status: 200,
-					headers: {
-						"Content-Type": "application/json",
-						...corsHeaders,
-					},
-				},
-			);
-		}
-
-		// Cloudflare Access configuration
-		const accessConfig: CloudflareAccessConfig = {
-			teamDomain: env.CF_ACCESS_TEAM_DOMAIN || "voither.cloudflareaccess.com",
-			audience:
-				env.CF_ACCESS_AUDIENCE ||
-				"0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
-		};
-
-		// Enable/disable authentication
-		const authEnabled = env.CF_ACCESS_ENABLED !== "false"; // Default to enabled
-
-		// Validate Cloudflare Access JWT if enabled (skip for health/root endpoints)
-		if (authEnabled) {
-			const authError = await validateCloudflareAccess(request, accessConfig);
-			if (authError) {
-				return authError;
-			}
-		}
-
-		// Process MCP requests with CORS
-		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			const response = await MetaMCP.serveSSE("/sse").fetch(request, env, ctx);
-			// Add CORS headers to SSE response
-			const newHeaders = new Headers(response.headers);
-			Object.entries(corsHeaders).forEach(([key, value]) => {
-				newHeaders.set(key, value);
-			});
-			return new Response(response.body, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: newHeaders,
-			});
-		}
-
-		if (url.pathname === "/mcp") {
-			const response = await MetaMCP.serve("/mcp").fetch(request, env, ctx);
-			// Add CORS headers to MCP response
-			const newHeaders = new Headers(response.headers);
-			Object.entries(corsHeaders).forEach(([key, value]) => {
-				newHeaders.set(key, value);
-			});
-			return new Response(response.body, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: newHeaders,
-			});
-		}
-
-		return new Response("Not found", {
-			status: 404,
-			headers: {
-				"Content-Type": "text/plain",
-				...corsHeaders,
-			},
-		});
 	},
 };
