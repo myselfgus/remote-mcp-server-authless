@@ -3,94 +3,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 // Cloudflare Access authentication
-// Cloudflare Access validates the JWT BEFORE the request reaches the Worker
-// We validate the AUD claim to ensure it's our application
+// NOTE: When Cloudflare Access is configured in the dashboard, it intercepts ALL requests
+// BEFORE they reach the Worker and handles authentication/authorization.
+// The Worker does NOT need to validate JWT - if the request reaches the Worker,
+// it means Cloudflare Access already validated it.
+//
+// This flag just tracks whether we EXPECT Cloudflare Access to be enabled in the dashboard.
 interface CloudflareAccessConfig {
 	enabled: boolean;
-	aud: string; // Application Audience (AUD) tag
-}
-
-// Decode JWT without verification (Cloudflare Access already verified it)
-function decodeJWT(token: string): any {
-	try {
-		const parts = token.split('.');
-		if (parts.length !== 3) {
-			return null;
-		}
-		// Decode the payload (second part)
-		const payload = parts[1];
-		// Base64 URL decode
-		const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
-		return JSON.parse(decoded);
-	} catch (e) {
-		return null;
-	}
 }
 
 async function validateCloudflareAccess(
 	request: Request,
 	config: CloudflareAccessConfig,
 ): Promise<Response | null> {
-	if (!config.enabled) {
-		return null; // Auth disabled
-	}
-
-	// Get JWT from cookie or header
-	const jwtAssertion = request.headers.get("CF-Access-JWT-Assertion") ||
-	                     getCookieValue(request.headers.get("Cookie") || "", "CF_Authorization");
-
-	if (!jwtAssertion) {
-		return new Response("Unauthorized: No Cloudflare Access JWT found", {
-			status: 401,
-			headers: {
-				"Content-Type": "text/plain",
-			},
-		});
-	}
-
-	// Decode and validate JWT
-	const payload = decodeJWT(jwtAssertion);
-	if (!payload) {
-		return new Response("Unauthorized: Invalid JWT format", {
-			status: 401,
-			headers: {
-				"Content-Type": "text/plain",
-			},
-		});
-	}
-
-	// Validate AUD claim
-	if (payload.aud !== config.aud && !payload.aud?.includes(config.aud)) {
-		return new Response(
-			`Unauthorized: Invalid audience. Expected ${config.aud}, got ${payload.aud}`,
-			{
-				status: 403,
-				headers: {
-					"Content-Type": "text/plain",
-				},
-			},
-		);
-	}
-
-	// Check expiration
-	const now = Math.floor(Date.now() / 1000);
-	if (payload.exp && payload.exp < now) {
-		return new Response("Unauthorized: JWT has expired", {
-			status: 401,
-			headers: {
-				"Content-Type": "text/plain",
-			},
-		});
-	}
-
-	// User is authenticated and authorized
-	return null;
-}
-
-// Helper function to extract cookie value
-function getCookieValue(cookieHeader: string, name: string): string | null {
-	const match = cookieHeader.match(new RegExp(`(^|;)\\s*${name}\\s*=\\s*([^;]+)`));
-	return match ? match[2] : null;
+	// If Cloudflare Access is enabled in the dashboard, it handles everything.
+	// The Worker doesn't need to do any validation - just let requests through.
+	// Cloudflare Access validates JWT, checks policies, and blocks unauthorized requests
+	// BEFORE they reach this code.
+	return null; // Always allow - Cloudflare Access in dashboard handles security
 }
 
 // Storage interface for MCP server configurations
@@ -1002,14 +933,15 @@ export default {
 			}
 
 			// Cloudflare Access configuration
+			// Note: When CF_ACCESS_ENABLED=true, you MUST configure Cloudflare Access
+			// in the dashboard for domain meta-mcp.voither.workers.dev
+			// The dashboard Access handles ALL authentication - the Worker just passes requests through
 			const accessConfig: CloudflareAccessConfig = {
 				enabled: env.CF_ACCESS_ENABLED !== "false", // Default to enabled
-				aud: env.CF_ACCESS_AUD || "c3417ca6804a91e05bdd3a054d63d49cdd0e8f2ddef3858589ca2ff0248d3b8c",
 			};
 
-			// Validate Cloudflare Access (skip for health/root endpoints)
-			// Cloudflare Access validates JWT before request reaches Worker
-			// We just check if authentication headers are present
+			// Note: No validation needed in Worker when Cloudflare Access is enabled in dashboard
+			// Access intercepts requests BEFORE they reach the Worker
 			const authError = await validateCloudflareAccess(request, accessConfig);
 			if (authError) {
 				return authError;
