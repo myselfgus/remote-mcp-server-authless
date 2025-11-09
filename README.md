@@ -117,55 +117,51 @@ Para instruções detalhadas, soluções de problemas e mais opções, veja [tes
 
 ## Segurança e Autenticação
 
-Este servidor implementa **validação de JWT do Cloudflare Access** para garantir que apenas usuários autorizados possam acessar as ferramentas MCP.
+Este servidor está protegido por **Cloudflare Access** para garantir que apenas usuários autorizados possam acessar as ferramentas MCP.
 
 ### Configuração do Cloudflare Access
 
-O servidor está configurado para validar tokens JWT em todas as requisições quando deployado em produção. A autenticação é feita através do Cloudflare Access com os seguintes parâmetros:
+**Aplicação:** meta-mcp
+**Application ID:** `a1715203-d8fe-467f-b1b1-054ecb21aa52`
+**Audience (AUD):** `4100b1ca3725d093f0381e0538014ba14ff62e5ba6488d2861271be6b91bb7d2`
 
-- **Team Domain**: `voither.cloudflareaccess.com`
-- **Audience (AUD)**: `0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3`
-- **JWKs URL**: `https://voither.cloudflareaccess.com/cdn-cgi/access/certs`
+### Variável de Ambiente
 
-### Variáveis de Ambiente
-
-Configure as seguintes variáveis de ambiente:
+Apenas uma variável é necessária:
 
 ```bash
 # Habilitar/desabilitar autenticação
-CF_ACCESS_ENABLED=true
-
-# Seu domínio do Cloudflare Access
-CF_ACCESS_TEAM_DOMAIN=voither.cloudflareaccess.com
-
-# Application Audience (AUD) tag
-CF_ACCESS_AUDIENCE=0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3
+CF_ACCESS_ENABLED=true  # Produção (padrão)
+CF_ACCESS_ENABLED=false # Desenvolvimento local
 ```
 
 ### Desenvolvimento Local
 
-Para desenvolvimento local, a autenticação está **desabilitada por padrão** através do arquivo `.dev.vars`:
+Para desenvolvimento local, a autenticação está **desabilitada por padrão** em `.dev.vars`:
 
 ```bash
 # .dev.vars
 CF_ACCESS_ENABLED=false
 ```
 
-Para testar a autenticação localmente, altere para `CF_ACCESS_ENABLED=true` no `.dev.vars`.
-
 ### Como Funciona
 
-1. **Validação de Header**: O servidor verifica o header `CF-Access-JWT-Assertion` em cada requisição
-2. **Verificação de Assinatura**: O JWT é validado usando as chaves públicas do Cloudflare Access
-3. **Validação de Claims**: Verifica audience (AUD) e expiração (exp)
-4. **Cache de Chaves**: As chaves públicas são cacheadas por 1 hora para performance
+1. **Cloudflare Access** valida o JWT **antes** da requisição chegar no Worker
+2. Se autenticado, adiciona headers: `CF-Access-Authenticated-User-Email` e `CF-Access-JWT-Assertion`
+3. Worker verifica se os headers estão presentes (validação instantânea <1ms)
+4. Não há verificação de assinatura ou busca de chaves - Cloudflare já fez isso!
+
+**Vantagens:**
+- ⚡ Performance máxima (sem validação duplicada)
+- 🔒 Segurança mantida (Cloudflare valida JWT)
+- 🚀 Sem timeouts ou travas de conexão
 
 ### Gerenciar Políticas
 
-Para gerenciar quem pode acessar o servidor:
-1. Acesse [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
-2. Vá em **Access** > **Applications**
-3. Configure as políticas de acesso para `meta-mcp.voither.workers.dev`
+Para gerenciar quem pode acessar:
+1. [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
+2. **Access** > **Applications** > **meta-mcp**
+3. Configure políticas de acesso
 
 ## Ferramentas Disponíveis
 
