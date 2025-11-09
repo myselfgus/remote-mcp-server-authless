@@ -25,26 +25,30 @@
 			}
 		]
 	},
+	// Storage bindings - uncomment and configure when resources are created:
+	// To create resources:
+	// 1. KV: wrangler kv namespace create MCP_KV
+	// 2. D1: wrangler d1 create mcp-database
+	// 3. R2: wrangler r2 bucket create mcp-storage
+	// 4. Vectorize: wrangler vectorize create mcp-vectors --dimensions=1536 --metric=cosine
+	/*
 	"kv_namespaces": [
 		{
 			"binding": "MCP_KV",
-			"id": "preview_id",
-			"preview_id": "preview_id"
+			"id": "YOUR_KV_NAMESPACE_ID"
 		}
 	],
 	"d1_databases": [
 		{
 			"binding": "MCP_DB",
 			"database_name": "mcp-database",
-			"database_id": "preview_id",
-			"preview_database_id": "preview_id"
+			"database_id": "YOUR_D1_DATABASE_ID"
 		}
 	],
 	"r2_buckets": [
 		{
 			"binding": "MCP_BUCKET",
-			"bucket_name": "mcp-storage",
-			"preview_bucket_name": "mcp-storage-preview"
+			"bucket_name": "mcp-storage"
 		}
 	],
 	"analytics_engine_datasets": [
@@ -58,6 +62,7 @@
 			"index_name": "mcp-vectors"
 		}
 	],
+	*/
 	"observability": {
 		"enabled": true
 	}

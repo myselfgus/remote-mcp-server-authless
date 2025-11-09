@@ -7,12 +7,12 @@ declare namespace Cloudflare {
 		ASSETS: Fetcher;
 		// Cloudflare Access environment variable
 		CF_ACCESS_ENABLED?: string;
-		// MCP Storage bindings
-		MCP_KV: KVNamespace;
-		MCP_DB: D1Database;
-		MCP_BUCKET: R2Bucket;
-		MCP_ANALYTICS: AnalyticsEngineDataset;
-		MCP_VECTORIZE: VectorizeIndex;
+		// MCP Storage bindings (optional - configure in wrangler.jsonc when ready)
+		MCP_KV?: KVNamespace;
+		MCP_DB?: D1Database;
+		MCP_BUCKET?: R2Bucket;
+		MCP_ANALYTICS?: AnalyticsEngineDataset;
+		MCP_VECTORIZE?: VectorizeIndex;
 	}
 }
 interface Env extends Cloudflare.Env {}
