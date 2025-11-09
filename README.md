@@ -21,6 +21,58 @@ npm run dev
 
 Seu Meta-MCP Server estará disponível em: `http://localhost:8787/sse`
 
+## Segurança e Autenticação
+
+Este servidor implementa **validação de JWT do Cloudflare Access** para garantir que apenas usuários autorizados possam acessar as ferramentas MCP.
+
+### Configuração do Cloudflare Access
+
+O servidor está configurado para validar tokens JWT em todas as requisições quando deployado em produção. A autenticação é feita através do Cloudflare Access com os seguintes parâmetros:
+
+- **Team Domain**: `voither.cloudflareaccess.com`
+- **Audience (AUD)**: `0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3`
+- **JWKs URL**: `https://voither.cloudflareaccess.com/cdn-cgi/access/certs`
+
+### Variáveis de Ambiente
+
+Configure as seguintes variáveis de ambiente:
+
+```bash
+# Habilitar/desabilitar autenticação
+CF_ACCESS_ENABLED=true
+
+# Seu domínio do Cloudflare Access
+CF_ACCESS_TEAM_DOMAIN=voither.cloudflareaccess.com
+
+# Application Audience (AUD) tag
+CF_ACCESS_AUDIENCE=0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3
+```
+
+### Desenvolvimento Local
+
+Para desenvolvimento local, a autenticação está **desabilitada por padrão** através do arquivo `.dev.vars`:
+
+```bash
+# .dev.vars
+CF_ACCESS_ENABLED=false
+```
+
+Para testar a autenticação localmente, altere para `CF_ACCESS_ENABLED=true` no `.dev.vars`.
+
+### Como Funciona
+
+1. **Validação de Header**: O servidor verifica o header `CF-Access-JWT-Assertion` em cada requisição
+2. **Verificação de Assinatura**: O JWT é validado usando as chaves públicas do Cloudflare Access
+3. **Validação de Claims**: Verifica audience (AUD) e expiração (exp)
+4. **Cache de Chaves**: As chaves públicas são cacheadas por 1 hora para performance
+
+### Gerenciar Políticas
+
+Para gerenciar quem pode acessar o servidor:
+1. Acesse [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
+2. Vá em **Access** > **Applications**
+3. Configure as políticas de acesso para `meta-mcp.voither.workers.dev`
+
 ## Ferramentas Disponíveis
 
 O Meta-MCP Server fornece 10 ferramentas poderosas:
