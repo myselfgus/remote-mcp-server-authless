@@ -1,6 +1,6 @@
-# MCP Remote Server Builder
+# MCP Remote Server - Meta-MCP Server Builder
 
-> Um Meta-MCP Server que fornece ferramentas precisas para criar, configurar e fazer deploy de MCP Remote Servers diretamente via MCP para Cloudflare Workers.
+> Um MCP Remote Server que fornece ferramentas precisas para criar, configurar e fazer deploy de outros MCP Remote Servers diretamente via MCP para Cloudflare Workers.
 
 ## O que é isso?
 
@@ -23,7 +23,22 @@ Seu Meta-MCP Server estará disponível em: `http://localhost:8787/sse`
 
 ## 🔌 Como Conectar
 
-### Opção 1: Claude Desktop (Recomendado)
+### Opção 1: Claude.ai (Web/Mobile)
+
+Conecte diretamente no Claude.ai ou no app mobile:
+
+**URL do servidor:**
+```
+https://meta-mcp.voither.workers.dev/sse
+```
+
+1. Abra Claude.ai (web ou app)
+2. Vá em Settings/Configurações
+3. Em "Model Context Protocol" ou "MCP Servers"
+4. Adicione novo servidor com a URL acima
+5. Pronto! As 10 ferramentas estarão disponíveis
+
+### Opção 2: Claude Desktop
 
 Edite o arquivo de configuração do Claude Desktop:
 
@@ -60,14 +75,14 @@ Edite o arquivo de configuração do Claude Desktop:
 
 **Depois de editar:** Reinicie o Claude Desktop completamente.
 
-### Opção 2: Cloudflare AI Playground
+### Opção 3: Cloudflare AI Playground
 
 1. Acesse [playground.ai.cloudflare.com](https://playground.ai.cloudflare.com/)
 2. Clique em "Connect MCP Server"
 3. Digite a URL: `https://meta-mcp.voither.workers.dev/sse`
 4. Pronto! As 10 ferramentas estarão disponíveis
 
-### Opção 3: Linha de Comando (Teste)
+### Opção 4: Linha de Comando (Teste)
 
 ```bash
 # Local
