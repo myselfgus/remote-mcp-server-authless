@@ -2,156 +2,37 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-// Cloudflare Access JWT validation
+// Cloudflare Access authentication
+// Note: Cloudflare Access validates the JWT BEFORE the request reaches the Worker
+// We just need to check if the authentication headers are present
 interface CloudflareAccessConfig {
-	teamDomain: string; // e.g., "voither.cloudflareaccess.com"
-	audience: string; // Application Audience (AUD) tag
-}
-
-interface JWKKey {
-	kid: string;
-	kty: string;
-	alg: string;
-	use?: string;
-	n: string;
-	e: string;
-}
-
-interface JWKSResponse {
-	keys: JWKKey[];
-	public_cert?: { kid: string; cert: string };
-	public_certs?: Array<{ kid: string; cert: string }>;
-}
-
-async function getJWKS(teamDomain: string): Promise<JWKKey[]> {
-	const certsUrl = `https://${teamDomain}/cdn-cgi/access/certs`;
-	const response = await fetch(certsUrl);
-
-	if (!response.ok) {
-		throw new Error(`Failed to fetch JWKS: ${response.status}`);
-	}
-
-	const jwks: JWKSResponse = await response.json();
-	return jwks.keys;
-}
-
-function base64UrlDecode(str: string): Uint8Array {
-	// Replace URL-safe characters and add padding
-	str = str.replace(/-/g, "+").replace(/_/g, "/");
-	while (str.length % 4) {
-		str += "=";
-	}
-
-	const binary = atob(str);
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) {
-		bytes[i] = binary.charCodeAt(i);
-	}
-	return bytes;
-}
-
-async function verifyJWT(token: string, config: CloudflareAccessConfig): Promise<boolean> {
-	try {
-		// Parse JWT
-		const parts = token.split(".");
-		if (parts.length !== 3) {
-			return false;
-		}
-
-		const [headerB64, payloadB64, signatureB64] = parts;
-
-		// Decode header and payload
-		const header = JSON.parse(new TextDecoder().decode(base64UrlDecode(headerB64)));
-		const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(payloadB64)));
-
-		// Verify audience
-		if (payload.aud !== config.audience && !payload.aud?.includes(config.audience)) {
-			console.error("Invalid audience:", payload.aud);
-			return false;
-		}
-
-		// Verify expiration
-		if (payload.exp && payload.exp < Date.now() / 1000) {
-			console.error("Token expired");
-			return false;
-		}
-
-		// Get JWKs
-		const keys = await getJWKS(config.teamDomain);
-
-		// Find the key matching the token's kid
-		const key = keys.find((k) => k.kid === header.kid);
-		if (!key) {
-			console.error("Key not found for kid:", header.kid);
-			return false;
-		}
-
-		// Import the public key
-		const cryptoKey = await crypto.subtle.importKey(
-			"jwk",
-			{
-				kty: key.kty,
-				n: key.n,
-				e: key.e,
-				alg: key.alg || "RS256",
-				ext: true,
-			},
-			{
-				name: "RSASSA-PKCS1-v1_5",
-				hash: "SHA-256",
-			},
-			false,
-			["verify"],
-		);
-
-		// Verify signature
-		const signatureBytes = base64UrlDecode(signatureB64);
-		const dataBytes = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
-
-		const isValid = await crypto.subtle.verify(
-			"RSASSA-PKCS1-v1_5",
-			cryptoKey,
-			signatureBytes,
-			dataBytes,
-		);
-
-		return isValid;
-	} catch (error) {
-		console.error("JWT verification error:", error);
-		return false;
-	}
+	enabled: boolean;
 }
 
 async function validateCloudflareAccess(
 	request: Request,
 	config: CloudflareAccessConfig,
 ): Promise<Response | null> {
-	// Get the JWT from the CF-Access-JWT-Assertion header
-	const token = request.headers.get("CF-Access-JWT-Assertion");
-
-	if (!token) {
-		return new Response("Unauthorized: No CF-Access-JWT-Assertion header", {
-			status: 401,
-			headers: {
-				"Content-Type": "text/plain",
-			},
-		});
+	if (!config.enabled) {
+		return null; // Auth disabled
 	}
 
-	// Verify the JWT
-	const isValid = await verifyJWT(token, config);
+	// Cloudflare Access adds these headers after successful authentication
+	const userEmail = request.headers.get("CF-Access-Authenticated-User-Email");
+	const jwtAssertion = request.headers.get("CF-Access-JWT-Assertion");
 
-	if (!isValid) {
-		return new Response("Unauthorized: Invalid JWT token", {
-			status: 401,
-			headers: {
-				"Content-Type": "text/plain",
-			},
-		});
+	// If Cloudflare Access headers are present, user is already authenticated
+	if (userEmail || jwtAssertion) {
+		return null; // User is authenticated by Cloudflare Access
 	}
 
-	// Token is valid, allow the request to proceed
-	return null;
+	// No authentication headers - user not authenticated
+	return new Response("Unauthorized: Please authenticate via Cloudflare Access", {
+		status: 401,
+		headers: {
+			"Content-Type": "text/plain",
+		},
+	});
 }
 
 // Storage interface for MCP server configurations
@@ -1064,26 +945,15 @@ export default {
 
 			// Cloudflare Access configuration
 			const accessConfig: CloudflareAccessConfig = {
-				teamDomain: env.CF_ACCESS_TEAM_DOMAIN || "voither.cloudflareaccess.com",
-				audience:
-					env.CF_ACCESS_AUDIENCE ||
-					"0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
+				enabled: env.CF_ACCESS_ENABLED !== "false", // Default to enabled
 			};
 
-			// Enable/disable authentication
-			const authEnabled = env.CF_ACCESS_ENABLED !== "false"; // Default to enabled
-
-			// Validate Cloudflare Access JWT if enabled (skip for health/root endpoints)
-			if (authEnabled) {
-				try {
-					const authError = await validateCloudflareAccess(request, accessConfig);
-					if (authError) {
-						return authError;
-					}
-				} catch (authErr) {
-					console.error("Auth validation error:", authErr);
-					// Continue without auth if validation fails
-				}
+			// Validate Cloudflare Access (skip for health/root endpoints)
+			// Cloudflare Access validates JWT before request reaches Worker
+			// We just check if authentication headers are present
+			const authError = await validateCloudflareAccess(request, accessConfig);
+			if (authError) {
+				return authError;
 			}
 
 			// Process MCP requests with CORS

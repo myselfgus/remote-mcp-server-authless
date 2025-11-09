@@ -5,9 +5,7 @@ declare namespace Cloudflare {
 		OAUTH_KV: KVNamespace;
 		MCP_OBJECT: DurableObjectNamespace<import("./src/index").MetaMCP>;
 		ASSETS: Fetcher;
-		// Cloudflare Access environment variables
-		CF_ACCESS_TEAM_DOMAIN?: string;
-		CF_ACCESS_AUDIENCE?: string;
+		// Cloudflare Access environment variable
 		CF_ACCESS_ENABLED?: string;
 	}
 }
