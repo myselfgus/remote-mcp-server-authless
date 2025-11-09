@@ -9,8 +9,6 @@
 	"compatibility_date": "2025-03-10",
 	"compatibility_flags": ["nodejs_compat"],
 	"vars": {
-		"CF_ACCESS_TEAM_DOMAIN": "voither.cloudflareaccess.com",
-		"CF_ACCESS_AUDIENCE": "0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
 		"CF_ACCESS_ENABLED": "true"
 	},
 	"migrations": [
