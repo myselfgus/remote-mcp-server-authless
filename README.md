@@ -21,6 +21,85 @@ npm run dev
 
 Seu Meta-MCP Server estará disponível em: `http://localhost:8787/sse`
 
+## 🔌 Como Conectar
+
+### Opção 1: Claude Desktop (Recomendado)
+
+Edite o arquivo de configuração do Claude Desktop:
+
+**Localização do arquivo:**
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/claude/claude_desktop_config.json`
+
+**Configuração para desenvolvimento local:**
+
+```json
+{
+  "mcpServers": {
+    "mcp-builder": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8787/sse"]
+    }
+  }
+}
+```
+
+**Configuração para produção:**
+
+```json
+{
+  "mcpServers": {
+    "mcp-builder": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://meta-mcp.voither.workers.dev/sse"]
+    }
+  }
+}
+```
+
+**Depois de editar:** Reinicie o Claude Desktop completamente.
+
+### Opção 2: Cloudflare AI Playground
+
+1. Acesse [playground.ai.cloudflare.com](https://playground.ai.cloudflare.com/)
+2. Clique em "Connect MCP Server"
+3. Digite a URL: `https://meta-mcp.voither.workers.dev/sse`
+4. Pronto! As 10 ferramentas estarão disponíveis
+
+### Opção 3: Linha de Comando (Teste)
+
+```bash
+# Local
+npx -y mcp-remote http://localhost:8787/sse
+
+# Produção
+npx -y mcp-remote https://meta-mcp.voither.workers.dev/sse
+```
+
+### ✅ Verificar Conexão
+
+```bash
+# Health check
+curl http://localhost:8787/health
+
+# Informações do servidor
+curl http://localhost:8787/
+```
+
+**Resposta esperada:**
+```json
+{
+  "status": "ok",
+  "server": "MCP Remote Server Builder",
+  "version": "1.0.0"
+}
+```
+
+### 📚 Guia Completo de Conexão
+
+Para instruções detalhadas, soluções de problemas e mais opções, veja [test-connection.md](test-connection.md).
+
 ## Segurança e Autenticação
 
 Este servidor implementa **validação de JWT do Cloudflare Access** para garantir que apenas usuários autorizados possam acessar as ferramentas MCP.

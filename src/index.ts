@@ -1009,16 +1009,89 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
 
+		// CORS headers for all responses
+		const corsHeaders = {
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type, Authorization, CF-Access-JWT-Assertion",
+			"Access-Control-Max-Age": "86400",
+		};
+
+		// Handle OPTIONS preflight requests
+		if (request.method === "OPTIONS") {
+			return new Response(null, {
+				status: 204,
+				headers: corsHeaders,
+			});
+		}
+
+		// Health check endpoint (no auth required)
+		if (url.pathname === "/health" || url.pathname === "/ping") {
+			return new Response(
+				JSON.stringify({
+					status: "ok",
+					server: "MCP Remote Server Builder",
+					version: "1.0.0",
+					timestamp: new Date().toISOString(),
+				}),
+				{
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						...corsHeaders,
+					},
+				},
+			);
+		}
+
+		// Root endpoint with server info (no auth required)
+		if (url.pathname === "/") {
+			return new Response(
+				JSON.stringify(
+					{
+						name: "MCP Remote Server Builder",
+						version: "1.0.0",
+						description:
+							"Meta-MCP Server for creating and deploying MCP Remote Servers",
+						endpoints: {
+							sse: "/sse (Server-Sent Events transport)",
+							mcp: "/mcp (HTTP POST transport)",
+							health: "/health (Health check)",
+							message: "/sse/message (SSE message endpoint)",
+						},
+						documentation: "https://github.com/myselfgus/remote-mcp-server-authless",
+						authentication: env.CF_ACCESS_ENABLED !== "false" ? "enabled" : "disabled",
+						usage: {
+							claude_desktop:
+								'Add to config: { "command": "npx", "args": ["mcp-remote", "URL/sse"] }',
+							direct_connection: "Connect to /sse endpoint for Server-Sent Events",
+						},
+					},
+					null,
+					2,
+				),
+				{
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						...corsHeaders,
+					},
+				},
+			);
+		}
+
 		// Cloudflare Access configuration
 		const accessConfig: CloudflareAccessConfig = {
 			teamDomain: env.CF_ACCESS_TEAM_DOMAIN || "voither.cloudflareaccess.com",
-			audience: env.CF_ACCESS_AUDIENCE || "0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
+			audience:
+				env.CF_ACCESS_AUDIENCE ||
+				"0f2923c24cec6a2ee1f63570394014228d05e00dab403548f82c65eb9c7a63f3",
 		};
 
 		// Enable/disable authentication
 		const authEnabled = env.CF_ACCESS_ENABLED !== "false"; // Default to enabled
 
-		// Validate Cloudflare Access JWT if enabled
+		// Validate Cloudflare Access JWT if enabled (skip for health/root endpoints)
 		if (authEnabled) {
 			const authError = await validateCloudflareAccess(request, accessConfig);
 			if (authError) {
@@ -1026,15 +1099,41 @@ export default {
 			}
 		}
 
-		// Process MCP requests
+		// Process MCP requests with CORS
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			return MetaMCP.serveSSE("/sse").fetch(request, env, ctx);
+			const response = await MetaMCP.serveSSE("/sse").fetch(request, env, ctx);
+			// Add CORS headers to SSE response
+			const newHeaders = new Headers(response.headers);
+			Object.entries(corsHeaders).forEach(([key, value]) => {
+				newHeaders.set(key, value);
+			});
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: newHeaders,
+			});
 		}
 
 		if (url.pathname === "/mcp") {
-			return MetaMCP.serve("/mcp").fetch(request, env, ctx);
+			const response = await MetaMCP.serve("/mcp").fetch(request, env, ctx);
+			// Add CORS headers to MCP response
+			const newHeaders = new Headers(response.headers);
+			Object.entries(corsHeaders).forEach(([key, value]) => {
+				newHeaders.set(key, value);
+			});
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers: newHeaders,
+			});
 		}
 
-		return new Response("Not found", { status: 404 });
+		return new Response("Not found", {
+			status: 404,
+			headers: {
+				"Content-Type": "text/plain",
+				...corsHeaders,
+			},
+		});
 	},
 };
