@@ -25,6 +25,13 @@
 			}
 		]
 	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "meta-mcp-db",
+			"database_id": "8dc4c0f5-7f82-4ed2-8501-be0b95a4fa38"
+		}
+	],
 	"observability": {
 		"enabled": true
 	}

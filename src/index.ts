@@ -1,5 +1,6 @@
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Connection } from "partyserver";
 import { z } from "zod";
 
 // Cloudflare Access authentication
@@ -67,17 +68,158 @@ interface WranglerConfig {
 	vars?: Record<string, any>;
 }
 
+// Database schema types for SQLite persistence
+interface DatabaseSchema {
+	mcp_servers: {
+		id: string;
+		name: string;
+		version: string;
+		description: string;
+		created_at: number;
+		updated_at: number;
+		wrangler_config: string; // JSON
+	};
+	mcp_tools: {
+		id: number;
+		server_id: string;
+		name: string;
+		description: string;
+		parameters: string; // JSON
+		implementation: string;
+		created_at: number;
+	};
+	mcp_resources: {
+		id: number;
+		server_id: string;
+		uri: string;
+		name: string;
+		description: string;
+		mime_type: string;
+		implementation: string;
+		created_at: number;
+	};
+	mcp_prompts: {
+		id: number;
+		server_id: string;
+		name: string;
+		description: string;
+		arguments: string; // JSON
+		template: string;
+		created_at: number;
+	};
+	cleanup_requests: {
+		id: string;
+		requested_at: number;
+		servers_to_delete: string; // JSON array
+		status: "pending" | "approved" | "rejected";
+		responded_at: number | null;
+	};
+	mcp_client_connections: {
+		id: string;
+		name: string;
+		url: string;
+		status: "connected" | "disconnected" | "error";
+		last_sync: number;
+		capabilities: string | null; // JSON
+		tools_count: number;
+		resources_count: number;
+		created_at: number;
+	};
+}
+
+// State management interface
+interface MetaMCPState {
+	// Server statistics
+	totalServers: number;
+	totalTools: number;
+	totalResources: number;
+	totalPrompts: number;
+
+	// Recent activity
+	lastServerCreated: {
+		name: string;
+		timestamp: number;
+	} | null;
+	lastServerUpdated: {
+		name: string;
+		timestamp: number;
+	} | null;
+	lastServerDeleted: {
+		name: string;
+		timestamp: number;
+	} | null;
+
+	// Cleanup state
+	pendingCleanupRequests: number;
+	lastCleanupRun: number | null;
+	nextScheduledCleanup: number | null;
+
+	// MCP client connections
+	connectedMCPServers: Array<{
+		name: string;
+		url: string;
+		status: "connected" | "disconnected" | "error";
+		lastSync: number;
+	}>;
+
+	// System health
+	databaseHealth: "healthy" | "degraded" | "error";
+	lastHealthCheck: number;
+}
+
+// Cleanup configuration
+interface CleanupConfig {
+	enabled: boolean;
+	daysThreshold: number;
+	checkIntervalMs: number;
+	requireConfirmation: boolean;
+	confirmationTimeoutMs: number;
+}
+
+const DEFAULT_CLEANUP_CONFIG: CleanupConfig = {
+	enabled: true,
+	daysThreshold: 30,
+	checkIntervalMs: 24 * 60 * 60 * 1000, // 24 hours
+	requireConfirmation: true,
+	confirmationTimeoutMs: 48 * 60 * 60 * 1000, // 48 hours
+};
+
 // Define our Meta-MCP agent that creates other MCP servers
-export class MetaMCP extends McpAgent {
+export class MetaMCP extends McpAgent<unknown, MetaMCPState> {
 	server = new McpServer({
 		name: "MCP Remote Server Builder",
 		version: "1.0.0",
 	});
 
-	// In-memory storage for server configurations (in production, use Durable Objects storage)
-	private servers: Map<string, MCPServerConfig> = new Map();
+	// Initialize state
+	initialState: MetaMCPState = {
+		totalServers: 0,
+		totalTools: 0,
+		totalResources: 0,
+		totalPrompts: 0,
+		lastServerCreated: null,
+		lastServerUpdated: null,
+		lastServerDeleted: null,
+		pendingCleanupRequests: 0,
+		lastCleanupRun: null,
+		nextScheduledCleanup: null,
+		connectedMCPServers: [],
+		databaseHealth: "healthy",
+		lastHealthCheck: Date.now(),
+	};
+
+	private isDbInitialized = false;
 
 	async init() {
+		// Initialize database first
+		await this.initializeDatabase();
+
+		// Initialize cleanup scheduling
+		const config = await this.ctx.storage.get<CleanupConfig>("cleanup_config");
+		if (!config) {
+			await this.ctx.storage.put("cleanup_config", DEFAULT_CLEANUP_CONFIG);
+		}
+
 		// Tool 1: Create a new MCP server
 		this.server.tool(
 			"create_mcp_server",
@@ -102,7 +244,8 @@ export class MetaMCP extends McpAgent {
 
 				const serverId = name;
 
-				if (this.servers.has(serverId)) {
+				const existingServer = await this.getServerFromDB(serverId);
+				if (existingServer !== null) {
 					return {
 						content: [
 							{
@@ -129,7 +272,8 @@ export class MetaMCP extends McpAgent {
 					updatedAt: Date.now(),
 				};
 
-				this.servers.set(serverId, config);
+				await this.saveServerToDB(serverId, config);
+				await this.notifyServerCreated(name);
 
 				return {
 					content: [
@@ -161,7 +305,7 @@ export class MetaMCP extends McpAgent {
 					),
 			},
 			async ({ serverId, toolName, description, parameters, implementation }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -192,7 +336,8 @@ export class MetaMCP extends McpAgent {
 				}
 
 				config.updatedAt = Date.now();
-				this.servers.set(serverId, config);
+				await this.saveServerToDB(serverId, config);
+				await this.notifyServerUpdated(config.name);
 
 				return {
 					content: [
@@ -219,7 +364,7 @@ export class MetaMCP extends McpAgent {
 					.describe("JavaScript code to generate the resource content (returns string)"),
 			},
 			async ({ serverId, uri, name, description, mimeType, implementation }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -251,7 +396,8 @@ export class MetaMCP extends McpAgent {
 				}
 
 				config.updatedAt = Date.now();
-				this.servers.set(serverId, config);
+				await this.saveServerToDB(serverId, config);
+				await this.notifyServerUpdated(config.name);
 
 				return {
 					content: [
@@ -288,7 +434,7 @@ export class MetaMCP extends McpAgent {
 					),
 			},
 			async ({ serverId, promptName, description, arguments: args, template }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -318,7 +464,8 @@ export class MetaMCP extends McpAgent {
 				}
 
 				config.updatedAt = Date.now();
-				this.servers.set(serverId, config);
+				await this.saveServerToDB(serverId, config);
+				await this.notifyServerUpdated(config.name);
 
 				return {
 					content: [
@@ -341,7 +488,7 @@ export class MetaMCP extends McpAgent {
 				compatibilityDate: z.string().optional().describe("Compatibility date"),
 			},
 			async ({ serverId, routes, vars, compatibilityDate }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -358,7 +505,8 @@ export class MetaMCP extends McpAgent {
 				if (compatibilityDate) config.wranglerConfig.compatibilityDate = compatibilityDate;
 
 				config.updatedAt = Date.now();
-				this.servers.set(serverId, config);
+				await this.saveServerToDB(serverId, config);
+				await this.notifyServerUpdated(config.name);
 
 				return {
 					content: [
@@ -382,7 +530,7 @@ export class MetaMCP extends McpAgent {
 					.describe("Which file to generate: index.ts, wrangler.jsonc, package.json, or all"),
 			},
 			async ({ serverId, fileType }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -431,7 +579,9 @@ export class MetaMCP extends McpAgent {
 			"list_mcp_servers",
 			{},
 			async () => {
-				if (this.servers.size === 0) {
+				const servers = await this.listServersFromDB();
+
+				if (servers.length === 0) {
 					return {
 						content: [
 							{
@@ -442,7 +592,7 @@ export class MetaMCP extends McpAgent {
 					};
 				}
 
-				const serverList = Array.from(this.servers.values())
+				const serverList = servers
 					.map(
 						(s) =>
 							`- **${s.name}** (v${s.version})\n  ${s.description}\n  Tools: ${s.tools.length}, Resources: ${s.resources.length}, Prompts: ${s.prompts.length}\n  Updated: ${new Date(s.updatedAt).toLocaleString()}`,
@@ -453,7 +603,7 @@ export class MetaMCP extends McpAgent {
 					content: [
 						{
 							type: "text",
-							text: `MCP Servers (${this.servers.size}):\n\n${serverList}`,
+							text: `MCP Servers (${servers.length}):\n\n${serverList}`,
 						},
 					],
 				};
@@ -467,7 +617,8 @@ export class MetaMCP extends McpAgent {
 				serverId: z.string().describe("ID of the MCP server to delete"),
 			},
 			async ({ serverId }) => {
-				if (!this.servers.has(serverId)) {
+				const config = await this.getServerFromDB(serverId);
+				if (!config) {
 					return {
 						content: [
 							{
@@ -478,7 +629,10 @@ export class MetaMCP extends McpAgent {
 					};
 				}
 
-				this.servers.delete(serverId);
+				const deleted = await this.deleteServerFromDB(serverId);
+				if (deleted) {
+					await this.notifyServerDeleted(config.name);
+				}
 
 				return {
 					content: [
@@ -498,7 +652,7 @@ export class MetaMCP extends McpAgent {
 				serverId: z.string().describe("ID of the MCP server"),
 			},
 			async ({ serverId }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -551,7 +705,7 @@ ${JSON.stringify(config.wranglerConfig, null, 2)}
 				serverId: z.string().describe("ID of the MCP server"),
 			},
 			async ({ serverId }) => {
-				const config = this.servers.get(serverId);
+				const config = await this.getServerFromDB(serverId);
 				if (!config) {
 					return {
 						content: [
@@ -632,6 +786,573 @@ Restart Claude Desktop and your tools will be available!
 				};
 			},
 		);
+
+		// Tool 11: Cleanup old servers with user confirmation
+		this.server.tool(
+			"cleanup_old_servers",
+			{
+				daysThreshold: z.number().default(30).describe("Delete servers older than this many days"),
+				dryRun: z.boolean().default(false).describe("Preview what would be deleted without actually deleting"),
+			},
+			async ({ daysThreshold, dryRun }) => {
+				const servers = await this.listServersFromDB();
+				const now = Date.now();
+				const threshold = daysThreshold * 24 * 60 * 60 * 1000;
+
+				const oldServers = servers.filter((s) => now - s.updatedAt > threshold);
+
+				if (oldServers.length === 0) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `No servers found older than ${daysThreshold} days.`,
+							},
+						],
+					};
+				}
+
+				const serverList = oldServers
+					.map(
+						(s) =>
+							`- ${s.name} (last updated: ${new Date(s.updatedAt).toLocaleString()}, ${Math.floor((now - s.updatedAt) / (24 * 60 * 60 * 1000))} days ago)`,
+					)
+					.join("\n");
+
+				if (dryRun) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `[DRY RUN] Found ${oldServers.length} servers older than ${daysThreshold} days:\n\n${serverList}\n\nRun without dryRun=true to proceed with deletion after confirmation.`,
+							},
+						],
+					};
+				}
+
+				// Use elicitInput to ask user for confirmation
+				try {
+					const result = await this.elicitInput({
+						message: `Found ${oldServers.length} servers older than ${daysThreshold} days:\n\n${serverList}\n\nDo you want to delete these servers? This action cannot be undone.`,
+						requestedSchema: {
+							type: "object",
+							properties: {
+								confirm: {
+									type: "boolean",
+									description: "Set to true to confirm deletion",
+								},
+							},
+							required: ["confirm"],
+						},
+					});
+
+					const confirmed = (result.content as { confirm: boolean }).confirm;
+
+					if (!confirmed) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "Cleanup cancelled by user.",
+								},
+							],
+						};
+					}
+
+					// Delete confirmed servers
+					let deletedCount = 0;
+					for (const server of oldServers) {
+						const deleted = await this.deleteServerFromDB(server.name);
+						if (deleted) {
+							await this.notifyServerDeleted(server.name);
+							deletedCount++;
+						}
+					}
+
+					// Update cleanup tracking
+					await this.setState({
+						...this.state,
+						lastCleanupRun: Date.now(),
+					});
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Successfully deleted ${deletedCount} old servers:\n\n${serverList}`,
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error during cleanup: ${error instanceof Error ? error.message : String(error)}`,
+							},
+						],
+					};
+				}
+			},
+		);
+
+		// Tool 12: Connect to an MCP server
+		this.server.tool(
+			"connect_to_mcp_server",
+			{
+				name: z.string().describe("Friendly name for this connection"),
+				url: z.string().describe("URL of the MCP server to connect to"),
+				transport: z
+					.enum(["streamable-http", "sse", "auto"])
+					.default("auto")
+					.describe("Transport type to use (auto will detect the best option)"),
+			},
+			async ({ name, url, transport }) => {
+				try {
+					// Connect using MCPClientManager
+					await this.mcp.connect(url, {
+						transport: { type: transport },
+					});
+
+					// Store connection in database
+					this.sql`
+						INSERT INTO mcp_client_connections (name, url, transport, status, last_sync, created_at)
+						VALUES (${name}, ${url}, ${transport}, 'connected', ${Date.now()}, ${Date.now()})
+						ON CONFLICT(name) DO UPDATE SET
+							url = ${url},
+							transport = ${transport},
+							status = 'connected',
+							last_sync = ${Date.now()}
+					`;
+
+					// Update state
+					const connections = this.state.connectedMCPServers || [];
+					const existing = connections.findIndex((c) => c.name === name);
+					if (existing >= 0) {
+						connections[existing] = { name, url, status: "connected", lastSync: Date.now() };
+					} else {
+						connections.push({ name, url, status: "connected", lastSync: Date.now() });
+					}
+
+					await this.setState({
+						...this.state,
+						connectedMCPServers: connections,
+					});
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Successfully connected to MCP server '${name}' at ${url} using ${transport} transport.`,
+							},
+						],
+					};
+				} catch (error) {
+					// Update connection status to error
+					this.sql`
+						UPDATE mcp_client_connections
+						SET status = 'error', last_sync = ${Date.now()}
+						WHERE name = ${name}
+					`;
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error connecting to MCP server '${name}': ${error instanceof Error ? error.message : String(error)}`,
+							},
+						],
+					};
+				}
+			},
+		);
+
+		// Tool 13: List connected MCP servers
+		this.server.tool(
+			"list_connected_mcp_servers",
+			{},
+			async () => {
+				const connections = this.sql<{
+					name: string;
+					url: string;
+					transport: string;
+					status: string;
+					last_sync: number;
+					created_at: number;
+				}>`SELECT * FROM mcp_client_connections ORDER BY created_at DESC`;
+
+				if (connections.length === 0) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "No MCP servers connected yet. Use connect_to_mcp_server to connect to an MCP server.",
+							},
+						],
+					};
+				}
+
+				const connectionList = connections
+					.map(
+						(c) =>
+							`- **${c.name}**\n  URL: ${c.url}\n  Transport: ${c.transport}\n  Status: ${c.status}\n  Last sync: ${new Date(c.last_sync).toLocaleString()}\n  Connected: ${new Date(c.created_at).toLocaleString()}`,
+					)
+					.join("\n\n");
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Connected MCP Servers (${connections.length}):\n\n${connectionList}`,
+						},
+					],
+				};
+			},
+		);
+
+		// Tool 14: Call a tool on a connected MCP server
+		this.server.tool(
+			"call_mcp_tool",
+			{
+				serverName: z.string().describe("Name of the connected MCP server"),
+				toolName: z.string().describe("Name of the tool to call"),
+				arguments: z.record(z.any()).default({}).describe("Arguments to pass to the tool"),
+			},
+			async ({ serverName, toolName, arguments: args }) => {
+				try {
+					// Get connection info
+					const connection = this.sql<{
+						name: string;
+						url: string;
+						status: string;
+					}>`SELECT * FROM mcp_client_connections WHERE name = ${serverName} LIMIT 1`;
+
+					if (connection.length === 0) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: No connection found with name '${serverName}'. Use connect_to_mcp_server first.`,
+								},
+							],
+						};
+					}
+
+					if (connection[0].status !== "connected") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Connection '${serverName}' is not active (status: ${connection[0].status}). Try reconnecting.`,
+								},
+							],
+						};
+					}
+
+					// Call the tool using MCPClientManager
+					const result = await this.mcp.callTool({
+						serverId: connection[0].url,
+						name: toolName,
+						arguments: args,
+					});
+
+					// Update last sync time
+					this.sql`
+						UPDATE mcp_client_connections
+						SET last_sync = ${Date.now()}
+						WHERE name = ${serverName}
+					`;
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Result from ${serverName}.${toolName}:\n\n${JSON.stringify(result, null, 2)}`,
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error calling tool '${toolName}' on server '${serverName}': ${error instanceof Error ? error.message : String(error)}`,
+							},
+						],
+					};
+				}
+			},
+		);
+	}
+
+	// State update handler
+	onStateUpdate(state: MetaMCPState | undefined, source: Connection | "server"): void {
+		console.log("State updated from:", source === "server" ? "server" : "client connection");
+		// Clients connected via SSE will automatically receive state updates
+	}
+
+	// Database initialization
+	private async initializeDatabase(): Promise<void> {
+		if (this.isDbInitialized) return;
+
+		// Create mcp_servers table
+		this.sql`
+			CREATE TABLE IF NOT EXISTS mcp_servers (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL UNIQUE,
+				version TEXT NOT NULL,
+				description TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				wrangler_config TEXT NOT NULL
+			)
+		`;
+
+		// Create mcp_tools table
+		this.sql`
+			CREATE TABLE IF NOT EXISTS mcp_tools (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				server_id TEXT NOT NULL,
+				name TEXT NOT NULL,
+				description TEXT NOT NULL,
+				parameters TEXT NOT NULL,
+				implementation TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE,
+				UNIQUE(server_id, name)
+			)
+		`;
+
+		// Create mcp_resources table
+		this.sql`
+			CREATE TABLE IF NOT EXISTS mcp_resources (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				server_id TEXT NOT NULL,
+				uri TEXT NOT NULL,
+				name TEXT NOT NULL,
+				description TEXT NOT NULL,
+				mime_type TEXT NOT NULL,
+				implementation TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE,
+				UNIQUE(server_id, uri)
+			)
+		`;
+
+		// Create mcp_prompts table
+		this.sql`
+			CREATE TABLE IF NOT EXISTS mcp_prompts (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				server_id TEXT NOT NULL,
+				name TEXT NOT NULL,
+				description TEXT NOT NULL,
+				arguments TEXT NOT NULL,
+				template TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE,
+				UNIQUE(server_id, name)
+			)
+		`;
+
+		// Create cleanup_requests table
+		this.sql`
+			CREATE TABLE IF NOT EXISTS cleanup_requests (
+				id TEXT PRIMARY KEY,
+				requested_at INTEGER NOT NULL,
+				servers_to_delete TEXT NOT NULL,
+				status TEXT NOT NULL,
+				responded_at INTEGER
+			)
+		`;
+
+		// Create mcp_client_connections table
+		this.sql`
+			CREATE TABLE IF NOT EXISTS mcp_client_connections (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL UNIQUE,
+				url TEXT NOT NULL,
+				status TEXT NOT NULL,
+				last_sync INTEGER NOT NULL,
+				capabilities TEXT,
+				tools_count INTEGER DEFAULT 0,
+				resources_count INTEGER DEFAULT 0,
+				created_at INTEGER NOT NULL
+			)
+		`;
+
+		// Create indexes
+		this.sql`CREATE INDEX IF NOT EXISTS idx_mcp_tools_server_id ON mcp_tools(server_id)`;
+		this.sql`CREATE INDEX IF NOT EXISTS idx_mcp_resources_server_id ON mcp_resources(server_id)`;
+		this.sql`CREATE INDEX IF NOT EXISTS idx_mcp_prompts_server_id ON mcp_prompts(server_id)`;
+		this.sql`CREATE INDEX IF NOT EXISTS idx_cleanup_status ON cleanup_requests(status, requested_at)`;
+		this.sql`CREATE INDEX IF NOT EXISTS idx_mcp_servers_updated ON mcp_servers(updated_at)`;
+		this.sql`CREATE INDEX IF NOT EXISTS idx_mcp_connections_status ON mcp_client_connections(status)`;
+
+		this.isDbInitialized = true;
+	}
+
+	// SQL helper methods for CRUD operations
+	private async getServerFromDB(serverId: string): Promise<MCPServerConfig | null> {
+		const serverRows = this.sql<DatabaseSchema["mcp_servers"]>`
+			SELECT * FROM mcp_servers WHERE id = ${serverId}
+		`;
+
+		if (serverRows.length === 0) return null;
+
+		const server = serverRows[0];
+
+		const tools = this.sql<DatabaseSchema["mcp_tools"]>`
+			SELECT * FROM mcp_tools WHERE server_id = ${serverId}
+		`.map((t) => ({
+			name: t.name,
+			description: t.description,
+			parameters: JSON.parse(t.parameters),
+			implementation: t.implementation,
+		}));
+
+		const resources = this.sql<DatabaseSchema["mcp_resources"]>`
+			SELECT * FROM mcp_resources WHERE server_id = ${serverId}
+		`.map((r) => ({
+			uri: r.uri,
+			name: r.name,
+			description: r.description,
+			mimeType: r.mime_type,
+			implementation: r.implementation,
+		}));
+
+		const prompts = this.sql<DatabaseSchema["mcp_prompts"]>`
+			SELECT * FROM mcp_prompts WHERE server_id = ${serverId}
+		`.map((p) => ({
+			name: p.name,
+			description: p.description,
+			arguments: JSON.parse(p.arguments),
+			template: p.template,
+		}));
+
+		return {
+			name: server.name,
+			version: server.version,
+			description: server.description,
+			tools,
+			resources,
+			prompts,
+			wranglerConfig: JSON.parse(server.wrangler_config),
+			createdAt: server.created_at,
+			updatedAt: server.updated_at,
+		};
+	}
+
+	private async saveServerToDB(serverId: string, config: MCPServerConfig): Promise<void> {
+		// Insert or update server
+		this.sql`
+			INSERT INTO mcp_servers (id, name, version, description, created_at, updated_at, wrangler_config)
+			VALUES (${serverId}, ${config.name}, ${config.version}, ${config.description},
+					${config.createdAt}, ${config.updatedAt}, ${JSON.stringify(config.wranglerConfig)})
+			ON CONFLICT(id) DO UPDATE SET
+				version = ${config.version},
+				description = ${config.description},
+				updated_at = ${config.updatedAt},
+				wrangler_config = ${JSON.stringify(config.wranglerConfig)}
+		`;
+
+		// Delete existing tools/resources/prompts for this server
+		this.sql`DELETE FROM mcp_tools WHERE server_id = ${serverId}`;
+		this.sql`DELETE FROM mcp_resources WHERE server_id = ${serverId}`;
+		this.sql`DELETE FROM mcp_prompts WHERE server_id = ${serverId}`;
+
+		// Insert tools
+		for (const tool of config.tools) {
+			this.sql`
+				INSERT INTO mcp_tools (server_id, name, description, parameters, implementation, created_at)
+				VALUES (${serverId}, ${tool.name}, ${tool.description}, ${JSON.stringify(tool.parameters)},
+						${tool.implementation}, ${Date.now()})
+			`;
+		}
+
+		// Insert resources
+		for (const resource of config.resources) {
+			this.sql`
+				INSERT INTO mcp_resources (server_id, uri, name, description, mime_type, implementation, created_at)
+				VALUES (${serverId}, ${resource.uri}, ${resource.name}, ${resource.description},
+						${resource.mimeType}, ${resource.implementation}, ${Date.now()})
+			`;
+		}
+
+		// Insert prompts
+		for (const prompt of config.prompts) {
+			this.sql`
+				INSERT INTO mcp_prompts (server_id, name, description, arguments, template, created_at)
+				VALUES (${serverId}, ${prompt.name}, ${prompt.description}, ${JSON.stringify(prompt.arguments)},
+						${prompt.template}, ${Date.now()})
+			`;
+		}
+	}
+
+	private async deleteServerFromDB(serverId: string): Promise<boolean> {
+		const result = this.sql`DELETE FROM mcp_servers WHERE id = ${serverId}`;
+		return result.length > 0;
+	}
+
+	private async listServersFromDB(): Promise<MCPServerConfig[]> {
+		const serverRows = this.sql<DatabaseSchema["mcp_servers"]>`SELECT * FROM mcp_servers`;
+
+		const servers: MCPServerConfig[] = [];
+		for (const server of serverRows) {
+			const config = await this.getServerFromDB(server.id);
+			if (config) servers.push(config);
+		}
+
+		return servers;
+	}
+
+	// State update helpers
+	private async updateServerStats(): Promise<void> {
+		const servers = await this.listServersFromDB();
+
+		let totalTools = 0;
+		let totalResources = 0;
+		let totalPrompts = 0;
+
+		for (const server of servers) {
+			totalTools += server.tools.length;
+			totalResources += server.resources.length;
+			totalPrompts += server.prompts.length;
+		}
+
+		const newState: Partial<MetaMCPState> = {
+			totalServers: servers.length,
+			totalTools,
+			totalResources,
+			totalPrompts,
+			lastHealthCheck: Date.now(),
+			databaseHealth: "healthy",
+		};
+
+		this.setState({ ...this.state, ...newState });
+	}
+
+	private async notifyServerCreated(name: string): Promise<void> {
+		await this.updateServerStats();
+		this.setState({
+			...this.state,
+			lastServerCreated: { name, timestamp: Date.now() },
+		});
+	}
+
+	private async notifyServerUpdated(name: string): Promise<void> {
+		await this.updateServerStats();
+		this.setState({
+			...this.state,
+			lastServerUpdated: { name, timestamp: Date.now() },
+		});
+	}
+
+	private async notifyServerDeleted(name: string): Promise<void> {
+		await this.updateServerStats();
+		this.setState({
+			...this.state,
+			lastServerDeleted: { name, timestamp: Date.now() },
+		});
 	}
 
 	// Helper method to generate index.ts
