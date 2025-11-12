@@ -2,10 +2,6 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Connection } from "partyserver";
 import { z } from "zod";
-import { nanoid } from "nanoid";
-
-// Export RPC class for service bindings
-export { MetaMCPRPC } from "./rpc";
 
 // Cloudflare Access authentication
 // NOTE: When Cloudflare Access is configured in the dashboard, it intercepts ALL requests
@@ -30,17 +26,6 @@ async function validateCloudflareAccess(
 }
 
 // Storage interface for MCP server configurations
-interface Env {
-	DB: D1Database;
-	KV: KVNamespace;
-	STORAGE: R2Bucket;
-	DISPATCHER: any;
-	WORKER_PUBLISHER: any;
-	CONTAINER_MANAGER: any;
-	MCP_CLIENT: any;
-	CF_ACCESS_ENABLED?: string;
-}
-
 interface MCPServerConfig {
 	id?: string;
 	name: string;
@@ -52,10 +37,6 @@ interface MCPServerConfig {
 	wranglerConfig: WranglerConfig;
 	createdAt: number;
 	updatedAt: number;
-	status?: 'draft' | 'creating' | 'building' | 'deploying' | 'active' | 'failed' | 'stopped';
-	worker_name?: string;
-	container_id?: string;
-	metadata?: Record<string, any>;
 }
 
 interface ToolDefinition {
@@ -205,7 +186,7 @@ const DEFAULT_CLEANUP_CONFIG: CleanupConfig = {
 };
 
 // Define our Meta-MCP agent that creates other MCP servers
-export class MetaMCP extends McpAgent<Env, MetaMCPState> {
+export class MetaMCP extends McpAgent<unknown, MetaMCPState> {
 	server = new McpServer({
 		name: "MCP Remote Server Builder",
 		version: "1.0.0",
@@ -288,7 +269,6 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 						compatibilityDate: "2025-03-10",
 						compatibilityFlags: ["nodejs_compat"],
 					},
-					status: 'draft',
 					createdAt: Date.now(),
 					updatedAt: Date.now(),
 				};
@@ -616,7 +596,7 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 				const serverList = servers
 					.map(
 						(s) =>
-							`- **${s.name}** (v${s.version}) - Status: ${s.status || 'draft'}\n  ${s.description}\n  Tools: ${s.tools.length}, Resources: ${s.resources.length}, Prompts: ${s.prompts.length}\n  Worker: ${s.worker_name || 'Not deployed'}\n  Updated: ${new Date(s.updatedAt).toLocaleString()}`,
+							`- **${s.name}** (v${s.version})\n  ${s.description}\n  Tools: ${s.tools.length}, Resources: ${s.resources.length}, Prompts: ${s.prompts.length}\n  Updated: ${new Date(s.updatedAt).toLocaleString()}`,
 					)
 					.join("\n\n");
 
@@ -650,29 +630,6 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 					};
 				}
 
-				// Se está deployed (status active), parar o worker
-				if (config.status === 'active' && config.worker_name) {
-					try {
-						// Update status to stopped
-						await this.env.DB.prepare(`
-							UPDATE mcp_servers SET status = 'stopped', updated_at = ? WHERE id = ?
-						`).bind(Date.now(), serverId).run();
-
-						// Delete deployment from namespace
-						const deployment = await this.env.DB.prepare(`
-							SELECT * FROM worker_deployments WHERE worker_name = ?
-						`).bind(config.worker_name).first() as any;
-
-						if (deployment) {
-							await this.env.WORKER_PUBLISHER.deleteDeployment(deployment.id);
-						}
-					} catch (error) {
-						console.warn(`Failed to stop worker for ${serverId}:`, error);
-						// Continua mesmo assim para deletar do D1 local
-					}
-				}
-
-				// Deletar do D1 local
 				const deleted = await this.deleteServerFromDB(serverId);
 				if (deleted) {
 					await this.notifyServerDeleted(config.name);
@@ -682,7 +639,7 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 					content: [
 						{
 							type: "text",
-							text: `Successfully deleted MCP server '${serverId}'${config.status === 'active' ? ' and stopped its deployment' : ''}.`,
+							text: `Successfully deleted MCP server '${serverId}'.`,
 						},
 					],
 				};
@@ -713,9 +670,6 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 
 **Version:** ${config.version}
 **Description:** ${config.description}
-**Status:** ${config.status || 'draft'}
-**Worker Name:** ${config.worker_name || 'Not deployed'}
-**Container ID:** ${config.container_id || 'N/A'}
 **Created:** ${new Date(config.createdAt).toLocaleString()}
 **Updated:** ${new Date(config.updatedAt).toLocaleString()}
 
@@ -732,7 +686,6 @@ ${config.prompts.map((p) => `- **${p.name}**: ${p.description}`).join("\n") || "
 \`\`\`json
 ${JSON.stringify(config.wranglerConfig, null, 2)}
 \`\`\`
-${config.metadata ? `\n## Metadata\n\`\`\`json\n${JSON.stringify(config.metadata, null, 2)}\n\`\`\`` : ''}
 				`.trim();
 
 				return {
@@ -765,52 +718,94 @@ ${config.metadata ? `\n## Metadata\n\`\`\`json\n${JSON.stringify(config.metadata
 					};
 				}
 
-				// Buscar deployment info real do D1 (se existir)
-				let deploymentUrl = 'Not deployed yet';
-				let deploymentStatus: string = config.status || 'draft';
+			const instructions = `
+# Deployment Instructions for ${config.name}
 
-				if (config.worker_name) {
-					const deployment = await this.env.DB.prepare(`
-						SELECT deployment_url, status FROM worker_deployments
-						WHERE worker_name = ?
-						ORDER BY deployed_at DESC
-						LIMIT 1
-					`).bind(config.worker_name).first();
+## Automated Deployment (Recommended)
 
-					if (deployment) {
-						deploymentUrl = (deployment.deployment_url as string) || `https://${config.worker_name}.meta-mcp.workers.dev`;
-						deploymentStatus = (deployment.status as string) || deploymentStatus;
-					}
-				}
+The easiest way to deploy your MCP server is using the **deploy_mcp_server** tool, which automates the entire process:
 
-				const instructions = `# Connection Instructions for ${config.name}
+```
+Use the deploy_mcp_server tool with serverId="${serverId}"
+```
 
-## Server Status
-- Server ID: ${serverId}
-- Deployment URL: ${deploymentUrl}
-- Status: ${deploymentStatus}
+This tool will:
+- Generate all necessary code and configuration files
+- Create and configure your Cloudflare Workers project
+- Deploy your MCP server to Cloudflare Workers
+- Return the deployment URL and connection instructions
 
-## Connect to Claude Desktop
+**RPC-based Deployment Available**: The deploy_mcp_server tool uses RPC-based deployment for seamless automation.
 
-Add this to your Claude Desktop config (~/.config/claude/claude_desktop_config.json):
+---
 
+## Manual Deployment (Fallback/Educational)
+
+If you prefer to deploy manually or need more control, follow these steps:
+
+### Step 1: Create Project Directory
+```bash
+mkdir ${config.name}
+cd ${config.name}
+```
+
+### Step 2: Get Generated Code
+Use the `get_mcp_server_code` tool with serverId="${serverId}" and fileType="all" to get all files.
+
+### Step 3: Save Files
+Save the generated files to your project:
+- src/index.ts
+- wrangler.jsonc
+- package.json
+- tsconfig.json (use the same from this project)
+
+### Step 4: Install Dependencies
+```bash
+npm install
+```
+
+### Step 5: Test Locally
+```bash
+npm run dev
+```
+
+Visit http://localhost:8787/sse to test your MCP server locally.
+
+### Step 6: Deploy to Cloudflare Workers
+```bash
+npm run deploy
+```
+
+Your MCP server will be deployed to:
+`${config.name}.<your-account>.workers.dev/sse`
+
+### Step 7: Connect to Claude Desktop
+Add to your Claude Desktop config (~/.config/claude/claude_desktop_config.json):
+
+```json
 {
   "mcpServers": {
     "${config.name}": {
       "command": "npx",
-      "args": ["mcp-remote", "${deploymentUrl}/sse"]
+      "args": [
+        "mcp-remote",
+        "https://${config.name}.<your-account>.workers.dev/sse"
+      ]
     }
   }
 }
+```
 
-## Tools Available
-${config.tools.map((t: any) => `- ${t.name}: ${t.description}`).join('\n') || 'No tools yet'}
+Restart Claude Desktop and your tools will be available!
 
-## Next Steps
-${deploymentStatus === 'active' ?
-	'1. Use connect_external_mcp to test the connection\n2. Use call_mcp_tool to invoke tools' :
-	'1. Deploy the server using deploy_mcp_server\n2. Check status with get_mcp_server_details'
-}`.trim();
+---
+
+## Summary
+
+- **Recommended**: Use `deploy_mcp_server` tool for automated deployment
+- **Alternative**: Follow the manual steps above if you need direct control
+- **Support**: Both workflows will result in a fully functional MCP server on Cloudflare Workers
+			`.trim();
 
 				return {
 					content: [
@@ -898,29 +893,7 @@ ${deploymentStatus === 'active' ?
 					// Delete confirmed servers
 					let deletedCount = 0;
 					for (const server of oldServers) {
-						// Se está deployed, parar worker
-						if (server.status === 'active' && server.worker_name) {
-							try {
-								// Update status to stopped
-								await this.env.DB.prepare(`
-									UPDATE mcp_servers SET status = 'stopped', updated_at = ? WHERE id = ?
-								`).bind(Date.now(), server.id).run();
-
-								// Delete deployment from namespace
-								const deployment = await this.env.DB.prepare(`
-									SELECT * FROM worker_deployments WHERE worker_name = ?
-								`).bind(server.worker_name).first() as any;
-
-								if (deployment) {
-									await this.env.WORKER_PUBLISHER.deleteDeployment(deployment.id);
-								}
-							} catch (error) {
-								console.warn(`Failed to stop worker for ${server.name}:`, error);
-							}
-						}
-
-						// Deletar do D1 (usa server.id se existir, senão usa server.name)
-						const deleted = await this.deleteServerFromDB(server.id || server.name);
+						const deleted = await this.deleteServerFromDB(server.name);
 						if (deleted) {
 							await this.notifyServerDeleted(server.name);
 							deletedCount++;
@@ -972,22 +945,16 @@ ${deploymentStatus === 'active' ?
 						transport: { type: transport },
 					});
 
-					// Store connection in database com AWAIT
-					await this.env.DB.prepare(`
-						INSERT INTO mcp_client_connections (id, name, url, status, last_sync, created_at)
-						VALUES (?, ?, ?, ?, ?, ?)
+					// Store connection in database
+					this.sql`
+						INSERT INTO mcp_client_connections (name, url, transport, status, last_sync, created_at)
+						VALUES (${name}, ${url}, ${transport}, 'connected', ${Date.now()}, ${Date.now()})
 						ON CONFLICT(name) DO UPDATE SET
-							url = excluded.url,
-							status = excluded.status,
-							last_sync = excluded.last_sync
-					`).bind(
-						`conn_${Date.now()}`,
-						name,
-						url,
-						'connected',
-						Date.now(),
-						Date.now()
-					).run();
+							url = ${url},
+							transport = ${transport},
+							status = 'connected',
+							last_sync = ${Date.now()}
+					`;
 
 					// Update state
 					const connections = this.state.connectedMCPServers || [];
@@ -1012,12 +979,12 @@ ${deploymentStatus === 'active' ?
 						],
 					};
 				} catch (error) {
-					// Update connection status to error com AWAIT
-					await this.env.DB.prepare(`
+					// Update connection status to error
+					this.sql`
 						UPDATE mcp_client_connections
-						SET status = ?, last_sync = ?
-						WHERE name = ?
-					`).bind('error', Date.now(), name).run();
+						SET status = 'error', last_sync = ${Date.now()}
+						WHERE name = ${name}
+					`;
 
 					return {
 						content: [
@@ -1036,13 +1003,14 @@ ${deploymentStatus === 'active' ?
 			"list_connected_mcp_servers",
 			{},
 			async () => {
-				// Query com AWAIT
-				const result = await this.env.DB.prepare(`
-					SELECT * FROM mcp_client_connections
-					ORDER BY created_at DESC
-				`).all();
-
-				const connections = result.results || [];
+				const connections = this.sql<{
+					name: string;
+					url: string;
+					transport: string;
+					status: string;
+					last_sync: number;
+					created_at: number;
+				}>`SELECT * FROM mcp_client_connections ORDER BY created_at DESC`;
 
 				if (connections.length === 0) {
 					return {
@@ -1057,8 +1025,8 @@ ${deploymentStatus === 'active' ?
 
 				const connectionList = connections
 					.map(
-						(c: any) =>
-							`- **${c.name}**\n  URL: ${c.url}\n  Status: ${c.status}\n  Last sync: ${new Date(c.last_sync).toLocaleString()}\n  Connected: ${new Date(c.created_at).toLocaleString()}`,
+						(c) =>
+							`- **${c.name}**\n  URL: ${c.url}\n  Transport: ${c.transport}\n  Status: ${c.status}\n  Last sync: ${new Date(c.last_sync).toLocaleString()}\n  Connected: ${new Date(c.created_at).toLocaleString()}`,
 					)
 					.join("\n\n");
 
@@ -1083,14 +1051,14 @@ ${deploymentStatus === 'active' ?
 			},
 			async ({ serverName, toolName, arguments: args }) => {
 				try {
-					// Get connection info com AWAIT
-					const result = await this.env.DB.prepare(`
-						SELECT * FROM mcp_client_connections
-						WHERE name = ?
-						LIMIT 1
-					`).bind(serverName).first();
+					// Get connection info
+					const connection = this.sql<{
+						name: string;
+						url: string;
+						status: string;
+					}>`SELECT * FROM mcp_client_connections WHERE name = ${serverName} LIMIT 1`;
 
-					if (!result) {
+					if (connection.length === 0) {
 						return {
 							content: [
 								{
@@ -1101,36 +1069,36 @@ ${deploymentStatus === 'active' ?
 						};
 					}
 
-					if (result.status !== "connected") {
+					if (connection[0].status !== "connected") {
 						return {
 							content: [
 								{
 									type: "text",
-									text: `Error: Connection '${serverName}' is not active (status: ${result.status}). Try reconnecting.`,
+									text: `Error: Connection '${serverName}' is not active (status: ${connection[0].status}). Try reconnecting.`,
 								},
 							],
 						};
 					}
 
 					// Call the tool using MCPClientManager
-					const toolResult = await this.mcp.callTool({
-						serverId: result.url as string,
+					const result = await this.mcp.callTool({
+						serverId: connection[0].url,
 						name: toolName,
 						arguments: args,
 					});
 
-					// Update last sync time com AWAIT
-					await this.env.DB.prepare(`
+					// Update last sync time
+					this.sql`
 						UPDATE mcp_client_connections
-						SET last_sync = ?
-						WHERE name = ?
-					`).bind(Date.now(), serverName).run();
+						SET last_sync = ${Date.now()}
+						WHERE name = ${serverName}
+					`;
 
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Result from ${serverName}.${toolName}:\n\n${JSON.stringify(toolResult, null, 2)}`,
+								text: `Result from ${serverName}.${toolName}:\n\n${JSON.stringify(result, null, 2)}`,
 							},
 						],
 					};
@@ -1145,276 +1113,6 @@ ${deploymentStatus === 'active' ?
 					};
 				}
 			},
-		);
-
-		// Tool 15: Deploy MCP server end-to-end
-		this.server.tool(
-			"deploy_mcp_server",
-			{
-				name: z.string().describe("Server name (e.g., 'weather-api')"),
-				description: z.string().describe("Server description"),
-				tools: z.array(z.object({
-					name: z.string(),
-					description: z.string(),
-					inputSchema: z.record(z.any()),
-					handler: z.string().describe("TypeScript code for the handler function")
-				})).describe("Array of tool definitions")
-			},
-			async ({ name, description, tools }) => {
-				try {
-					const serverId = nanoid();
-					const workerName = `mcp-${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
-
-					// 1. Create record in mcp_servers
-					await this.env.DB.prepare(`
-						INSERT INTO mcp_servers (
-							id, name, version, description, status, created_at, updated_at, wrangler_config
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-					`).bind(
-						serverId,
-						name,
-						'1.0.0',
-						description,
-						'creating',
-						Date.now(),
-						Date.now(),
-						JSON.stringify({
-							name: workerName,
-							compatibility_date: '2025-03-10',
-							compatibility_flags: ['nodejs_compat']
-						})
-					).run();
-
-					// 2. Store tools in database
-					for (const tool of tools) {
-						await this.env.DB.prepare(`
-							INSERT INTO mcp_tools (server_id, name, description, parameters, implementation, created_at, handler_code)
-							VALUES (?, ?, ?, ?, ?, ?, ?)
-						`).bind(
-							serverId,
-							tool.name,
-							tool.description,
-							JSON.stringify(tool.inputSchema),
-							'', // Legacy field
-							Date.now(),
-							tool.handler
-						).run();
-					}
-
-					// 3. Create SDK environment in container
-					await this.env.DB.prepare(`
-						UPDATE mcp_servers SET status = 'building' WHERE id = ?
-					`).bind(serverId).run();
-
-					const containerResult = await this.env.CONTAINER_MANAGER.createSDKEnvironment(
-						serverId,
-						['@modelcontextprotocol/sdk', 'agents', 'zod']
-					);
-
-					if (!containerResult.success) {
-						throw new Error('Failed to create SDK environment: ' + containerResult.error);
-					}
-
-					// 4. Generate MCP server code (simplified inline version)
-					const toolsCode = tools.map(tool => `
-						{
-							name: "${tool.name}",
-							description: "${tool.description}",
-							inputSchema: ${JSON.stringify(tool.inputSchema, null, 2)},
-							handler: ${tool.handler}
-						}
-					`).join(',\n');
-
-					const code = {
-						'index.ts': `
-import { McpAgent } from "agents/mcp";
-import { z } from "zod";
-
-const tools = [
-	${toolsCode}
-];
-
-export class ${name.replace(/[^a-zA-Z0-9]/g, '')}Server extends McpAgent {
-	name = "${name}";
-	version = "1.0.0";
-	description = "${description}";
-
-	constructor() {
-		super();
-		for (const tool of tools) {
-			this.server.tool(tool.name, tool.inputSchema, tool.handler);
-		}
-	}
-}
-
-export default {
-	async fetch(request: Request, env: any, ctx: ExecutionContext) {
-		const server = new ${name.replace(/[^a-zA-Z0-9]/g, '')}Server();
-		return await server.fetch(request, env, ctx);
-	}
-};
-`,
-						'package.json': `{
-  "name": "${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}",
-  "version": "1.0.0",
-  "description": "${description}",
-  "main": "index.ts",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "agents": "latest",
-    "zod": "^3.22.0"
-  }
-}`,
-						'wrangler.jsonc': `{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}",
-  "main": "index.ts",
-  "compatibility_date": "2025-03-10",
-  "compatibility_flags": ["nodejs_compat"]
-}`
-					};
-
-					// 5. Build in container
-					const buildResult = await this.env.CONTAINER_MANAGER.buildMCPServer(
-						containerResult.containerId,
-						serverId,
-						code
-					);
-
-					if (!buildResult.success) {
-						throw new Error('Build failed: ' + buildResult.error);
-					}
-
-					// 6. Deploy via worker-publisher
-					await this.env.DB.prepare(`
-						UPDATE mcp_servers SET status = 'deploying', container_id = ? WHERE id = ?
-					`).bind(containerResult.containerId, serverId).run();
-
-					const deployResult = await this.env.WORKER_PUBLISHER.deployFromMetaMCP(
-						serverId,
-						workerName,
-						buildResult.scriptContent
-					);
-
-					if (!deployResult.success) {
-						throw new Error('Deployment failed: ' + deployResult.error);
-					}
-
-					// 7. Update final status
-					await this.env.DB.prepare(`
-						UPDATE mcp_servers SET status = 'active', worker_name = ?, updated_at = ? WHERE id = ?
-					`).bind(workerName, Date.now(), serverId).run();
-
-					return {
-						content: [{
-							type: "text",
-							text: `✅ MCP Server deployed successfully!
-
-Server ID: ${serverId}
-Worker Name: ${workerName}
-Deployment URL: ${deployResult.deploymentUrl}
-Tools: ${tools.map(t => t.name).join(', ')}
-
-Use connect_to_mcp_server to connect and test it.`
-						}]
-					};
-				} catch (error) {
-					return {
-						content: [{
-							type: "text",
-							text: `Error: ${error instanceof Error ? error.message : String(error)}`
-						}]
-					};
-				}
-			}
-		);
-
-		// Tool 16: Create SDK environment using ContainerManagerRPC
-		this.server.tool(
-			"create_sdk_environment",
-			{
-				serverId: z.string().describe("Server ID for the environment"),
-				packages: z.array(z.string()).default(['@modelcontextprotocol/sdk', 'agents', 'zod']).describe("NPM packages to install")
-			},
-			async ({ serverId, packages }) => {
-				try {
-					const result = await this.env.CONTAINER_MANAGER.createSDKEnvironment(serverId, packages);
-
-					if (!result.success) {
-						return {
-							content: [{
-								type: "text",
-								text: `Failed to create SDK environment: ${result.error}`
-							}]
-						};
-					}
-
-					return {
-						content: [{
-							type: "text",
-							text: `✅ SDK environment created!
-
-Container ID: ${result.containerId}
-Packages installed: ${packages.join(', ')}
-
-Use this container for building MCP servers.`
-						}]
-					};
-				} catch (error) {
-					return {
-						content: [{
-							type: "text",
-							text: `Error: ${error instanceof Error ? error.message : String(error)}`
-						}]
-					};
-				}
-			}
-		);
-
-		// Tool 17: Connect to external MCP server using MCPClientRPC
-		this.server.tool(
-			"connect_external_mcp",
-			{
-				serverId: z.string().describe("Unique ID for this connection"),
-				serverUrl: z.string().describe("MCP server URL (e.g., https://server.workers.dev/sse)"),
-				serverName: z.string().describe("Friendly name for the server")
-			},
-			async ({ serverId, serverUrl, serverName }) => {
-				try {
-					const result = await this.env.MCP_CLIENT.connectToServer(serverId, serverUrl, serverName);
-
-					if (!result.success) {
-						return {
-							content: [{
-								type: "text",
-								text: `Connection failed: ${result.error}`
-							}]
-						};
-					}
-
-					return {
-						content: [{
-							type: "text",
-							text: `✅ Connected to external MCP server!
-
-Connection ID: ${result.connectionId}
-Server URL: ${serverUrl}
-Tools available: ${result.tools?.length || 0}
-
-${result.tools?.map((t: any) => `- ${t.name}: ${t.description}`).join('\n') || 'No tools'}
-
-Use call_mcp_tool to invoke tools from this server.`
-						}]
-					};
-				} catch (error) {
-					return {
-						content: [{
-							type: "text",
-							text: `Error: ${error instanceof Error ? error.message : String(error)}`
-						}]
-					};
-				}
-			}
 		);
 	}
 
@@ -1526,31 +1224,26 @@ Use call_mcp_tool to invoke tools from this server.`
 
 	// SQL helper methods for CRUD operations
 	private async getServerFromDB(serverId: string): Promise<MCPServerConfig | null> {
-		// Query principal com AWAIT
-		const serverResult = await this.env.DB.prepare(`
-			SELECT * FROM mcp_servers WHERE id = ?
-		`).bind(serverId).first();
+		const serverRows = this.sql<DatabaseSchema["mcp_servers"]>`
+			SELECT * FROM mcp_servers WHERE id = ${serverId}
+		`;
 
-		if (!serverResult) return null;
+		if (serverRows.length === 0) return null;
 
-		// Buscar tools relacionadas
-		const toolsResult = await this.env.DB.prepare(`
-			SELECT * FROM mcp_tools WHERE server_id = ?
-		`).bind(serverId).all();
+		const server = serverRows[0];
 
-		const tools = (toolsResult.results || []).map((t: any) => ({
+		const tools = this.sql<DatabaseSchema["mcp_tools"]>`
+			SELECT * FROM mcp_tools WHERE server_id = ${serverId}
+		`.map((t) => ({
 			name: t.name,
 			description: t.description,
 			parameters: JSON.parse(t.parameters),
 			implementation: t.implementation,
 		}));
 
-		// Buscar resources
-		const resourcesResult = await this.env.DB.prepare(`
-			SELECT * FROM mcp_resources WHERE server_id = ?
-		`).bind(serverId).all();
-
-		const resources = (resourcesResult.results || []).map((r: any) => ({
+		const resources = this.sql<DatabaseSchema["mcp_resources"]>`
+			SELECT * FROM mcp_resources WHERE server_id = ${serverId}
+		`.map((r) => ({
 			uri: r.uri,
 			name: r.name,
 			description: r.description,
@@ -1558,143 +1251,85 @@ Use call_mcp_tool to invoke tools from this server.`
 			implementation: r.implementation,
 		}));
 
-		// Buscar prompts
-		const promptsResult = await this.env.DB.prepare(`
-			SELECT * FROM mcp_prompts WHERE server_id = ?
-		`).bind(serverId).all();
-
-		const prompts = (promptsResult.results || []).map((p: any) => ({
+		const prompts = this.sql<DatabaseSchema["mcp_prompts"]>`
+			SELECT * FROM mcp_prompts WHERE server_id = ${serverId}
+		`.map((p) => ({
 			name: p.name,
 			description: p.description,
 			arguments: JSON.parse(p.arguments),
 			template: p.template,
 		}));
 
-		// Retornar com TODOS os campos (incluindo novos)
 		return {
-			id: serverResult.id as string,
-			name: serverResult.name as string,
-			version: serverResult.version as string,
-			description: serverResult.description as string,
+			name: server.name,
+			version: server.version,
+			description: server.description,
 			tools,
 			resources,
 			prompts,
-			wranglerConfig: JSON.parse(serverResult.wrangler_config as string),
-			createdAt: serverResult.created_at as number,
-			updatedAt: serverResult.updated_at as number,
-			status: serverResult.status as any,
-			worker_name: serverResult.worker_name as string | undefined,
-			container_id: serverResult.container_id as string | undefined,
-			metadata: serverResult.metadata ? JSON.parse(serverResult.metadata as string) : undefined,
+			wranglerConfig: JSON.parse(server.wrangler_config),
+			createdAt: server.created_at,
+			updatedAt: server.updated_at,
 		};
 	}
 
 	private async saveServerToDB(serverId: string, config: MCPServerConfig): Promise<void> {
-		// Insert or update server com AWAIT e TODOS os campos
-		await this.env.DB.prepare(`
-			INSERT INTO mcp_servers (
-				id, name, version, description,
-				status, worker_name, container_id, metadata,
-				created_at, updated_at, wrangler_config
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		// Insert or update server
+		this.sql`
+			INSERT INTO mcp_servers (id, name, version, description, created_at, updated_at, wrangler_config)
+			VALUES (${serverId}, ${config.name}, ${config.version}, ${config.description},
+					${config.createdAt}, ${config.updatedAt}, ${JSON.stringify(config.wranglerConfig)})
 			ON CONFLICT(id) DO UPDATE SET
-				version = excluded.version,
-				description = excluded.description,
-				status = excluded.status,
-				worker_name = excluded.worker_name,
-				container_id = excluded.container_id,
-				metadata = excluded.metadata,
-				updated_at = excluded.updated_at,
-				wrangler_config = excluded.wrangler_config
-		`).bind(
-			serverId,
-			config.name,
-			config.version,
-			config.description,
-			config.status || 'draft',
-			config.worker_name || null,
-			config.container_id || null,
-			config.metadata ? JSON.stringify(config.metadata) : null,
-			config.createdAt,
-			config.updatedAt,
-			JSON.stringify(config.wranglerConfig)
-		).run();
+				version = ${config.version},
+				description = ${config.description},
+				updated_at = ${config.updatedAt},
+				wrangler_config = ${JSON.stringify(config.wranglerConfig)}
+		`;
 
-		// Delete existing tools/resources/prompts for this server com AWAIT
-		await this.env.DB.prepare(`DELETE FROM mcp_tools WHERE server_id = ?`).bind(serverId).run();
-		await this.env.DB.prepare(`DELETE FROM mcp_resources WHERE server_id = ?`).bind(serverId).run();
-		await this.env.DB.prepare(`DELETE FROM mcp_prompts WHERE server_id = ?`).bind(serverId).run();
+		// Delete existing tools/resources/prompts for this server
+		this.sql`DELETE FROM mcp_tools WHERE server_id = ${serverId}`;
+		this.sql`DELETE FROM mcp_resources WHERE server_id = ${serverId}`;
+		this.sql`DELETE FROM mcp_prompts WHERE server_id = ${serverId}`;
 
-		// Insert tools com AWAIT
+		// Insert tools
 		for (const tool of config.tools) {
-			await this.env.DB.prepare(`
+			this.sql`
 				INSERT INTO mcp_tools (server_id, name, description, parameters, implementation, created_at)
-				VALUES (?, ?, ?, ?, ?, ?)
-			`).bind(
-				serverId,
-				tool.name,
-				tool.description,
-				JSON.stringify(tool.parameters),
-				tool.implementation,
-				Date.now()
-			).run();
+				VALUES (${serverId}, ${tool.name}, ${tool.description}, ${JSON.stringify(tool.parameters)},
+						${tool.implementation}, ${Date.now()})
+			`;
 		}
 
-		// Insert resources com AWAIT
+		// Insert resources
 		for (const resource of config.resources) {
-			await this.env.DB.prepare(`
+			this.sql`
 				INSERT INTO mcp_resources (server_id, uri, name, description, mime_type, implementation, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-			`).bind(
-				serverId,
-				resource.uri,
-				resource.name,
-				resource.description,
-				resource.mimeType,
-				resource.implementation,
-				Date.now()
-			).run();
+				VALUES (${serverId}, ${resource.uri}, ${resource.name}, ${resource.description},
+						${resource.mimeType}, ${resource.implementation}, ${Date.now()})
+			`;
 		}
 
-		// Insert prompts com AWAIT
+		// Insert prompts
 		for (const prompt of config.prompts) {
-			await this.env.DB.prepare(`
+			this.sql`
 				INSERT INTO mcp_prompts (server_id, name, description, arguments, template, created_at)
-				VALUES (?, ?, ?, ?, ?, ?)
-			`).bind(
-				serverId,
-				prompt.name,
-				prompt.description,
-				JSON.stringify(prompt.arguments),
-				prompt.template,
-				Date.now()
-			).run();
+				VALUES (${serverId}, ${prompt.name}, ${prompt.description}, ${JSON.stringify(prompt.arguments)},
+						${prompt.template}, ${Date.now()})
+			`;
 		}
 	}
 
 	private async deleteServerFromDB(serverId: string): Promise<boolean> {
-		// Query com AWAIT
-		const result = await this.env.DB.prepare(`
-			DELETE FROM mcp_servers WHERE id = ?
-		`).bind(serverId).run();
-
-		// Verificar se deletou algo
-		return (result.meta?.changes || 0) > 0;
+		const result = this.sql`DELETE FROM mcp_servers WHERE id = ${serverId}`;
+		return result.length > 0;
 	}
 
 	private async listServersFromDB(): Promise<MCPServerConfig[]> {
-		// Query com AWAIT
-		const serverResult = await this.env.DB.prepare(`
-			SELECT * FROM mcp_servers ORDER BY created_at DESC
-		`).all();
+		const serverRows = this.sql<DatabaseSchema["mcp_servers"]>`SELECT * FROM mcp_servers`;
 
-		const serverRows = serverResult.results || [];
 		const servers: MCPServerConfig[] = [];
-
-		// Para cada servidor, buscar detalhes completos
 		for (const server of serverRows) {
-			const config = await this.getServerFromDB((server as any).id);
+			const config = await this.getServerFromDB(server.id);
 			if (config) servers.push(config);
 		}
 

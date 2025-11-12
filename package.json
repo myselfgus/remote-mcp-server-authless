@@ -14,6 +14,7 @@
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "1.17.3",
 		"agents": "^0.0.113",
+		"nanoid": "^5.1.6",
 		"zod": "^3.25.76"
 	},
 	"devDependencies": {

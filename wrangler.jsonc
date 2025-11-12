@@ -32,6 +32,41 @@
 			"database_id": "8dc4c0f5-7f82-4ed2-8501-be0b95a4fa38"
 		}
 	],
+	"kv_namespaces": [
+		{
+			"binding": "KV",
+			"id": "a1afcfa24f9a4cd2a135117098493a49"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "STORAGE",
+			"bucket_name": "meta-mcp-storage"
+		}
+	],
+	"dispatch_namespaces": [
+		{
+			"binding": "DISPATCHER",
+			"namespace": "meta-mcp",
+			"outbound": {
+				"service": "meta-mcp"
+			}
+		}
+	],
+	"services": [
+		{
+			"binding": "WORKER_PUBLISHER",
+			"service": "worker-publisher"
+		},
+		{
+			"binding": "CONTAINER_MANAGER",
+			"service": "containers-manager"
+		},
+		{
+			"binding": "MCP_CLIENT",
+			"service": "mcp-client"
+		}
+	],
 	"observability": {
 		"enabled": true
 	}
