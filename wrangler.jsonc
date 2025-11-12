@@ -56,15 +56,21 @@
 	"services": [
 		{
 			"binding": "WORKER_PUBLISHER",
-			"service": "worker-publisher"
+			"service": "worker-publisher",
+			"environment": "production",
+			"entrypoint": "WorkerPublisherRPC"
 		},
 		{
 			"binding": "CONTAINER_MANAGER",
-			"service": "containers-manager"
+			"service": "containers-manager",
+			"environment": "production",
+			"entrypoint": "ContainerManagerRPC"
 		},
 		{
 			"binding": "MCP_CLIENT",
-			"service": "mcp-client"
+			"service": "mcp-client",
+			"environment": "production",
+			"entrypoint": "MCPClientRPC"
 		}
 	],
 	"observability": {

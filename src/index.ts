@@ -240,70 +240,116 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 			await this.ctx.storage.put("cleanup_config", DEFAULT_CLEANUP_CONFIG);
 		}
 
-		// Tool 1: Create a new MCP server
+		// Tool 1: Initialize MCP server with container template
 		this.server.tool(
-			"create_mcp_server",
+			"init_mcp_server",
 			{
 				name: z.string().describe("Name of the MCP server (e.g., 'weather-server')"),
 				version: z.string().default("1.0.0").describe("Version of the server"),
 				description: z.string().describe("Description of what the MCP server does"),
 			},
 			async ({ name, version, description }) => {
-				// Validate name format
-				const nameRegex = /^[a-z0-9-]+$/;
-				if (!nameRegex.test(name)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: "Error: Server name must contain only lowercase letters, numbers, and hyphens",
-							},
-						],
-					};
-				}
+				try {
+					// Validate name format
+					const nameRegex = /^[a-z0-9-]+$/;
+					if (!nameRegex.test(name)) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "Error: Server name must contain only lowercase letters, numbers, and hyphens",
+								},
+							],
+						};
+					}
 
-				const serverId = name;
+					const serverId = name;
 
-				const existingServer = await this.getServerFromDB(serverId);
-				if (existingServer !== null) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Error: Server '${name}' already exists. Use update tools to modify it.`,
-							},
-						],
-					};
-				}
+					const existingServer = await this.getServerFromDB(serverId);
+					if (existingServer !== null) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${name}' already exists. Use update tools to modify it.`,
+								},
+							],
+						};
+					}
 
-				const config: MCPServerConfig = {
-					name,
-					version,
-					description,
-					tools: [],
-					resources: [],
-					prompts: [],
-					wranglerConfig: {
+					// Create initial config
+					const config: MCPServerConfig = {
 						name,
-						compatibilityDate: "2025-03-10",
-						compatibilityFlags: ["nodejs_compat"],
-					},
-					status: 'draft',
-					createdAt: Date.now(),
-					updatedAt: Date.now(),
-				};
-
-				await this.saveServerToDB(serverId, config);
-				await this.notifyServerCreated(name);
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Successfully created MCP server '${name}'!\n\nNext steps:\n1. Add tools using add_mcp_tool\n2. Optionally add resources using add_mcp_resource\n3. Optionally add prompts using add_mcp_prompt\n4. Configure deployment using configure_wrangler\n5. Generate code using get_mcp_server_code\n6. Deploy using deploy_mcp_server`,
+						version,
+						description,
+						tools: [],
+						resources: [],
+						prompts: [],
+						wranglerConfig: {
+							name,
+							compatibilityDate: "2025-03-10",
+							compatibilityFlags: ["nodejs_compat"],
 						},
-					],
-				};
+						status: 'creating',
+						createdAt: Date.now(),
+						updatedAt: Date.now(),
+					};
+
+					// Save to D1
+					await this.saveServerToDB(serverId, config);
+
+					// Initialize container via CONTAINER_MANAGER RPC
+					const containerResult = await this.env.CONTAINER_MANAGER.createSDKEnvironment(
+						serverId,
+						['@modelcontextprotocol/sdk', 'agents', 'zod']
+					);
+
+					if (!containerResult.success) {
+						// Update status to failed
+						config.status = 'failed';
+						config.metadata = { error: containerResult.error };
+						await this.saveServerToDB(serverId, config);
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Failed to create SDK environment in container: ${containerResult.error}`,
+								},
+							],
+						};
+					}
+
+					// Update config with container info and set to draft (ready for tools)
+					config.status = 'draft';
+					config.container_id = containerResult.containerId;
+					config.metadata = {
+						containerCreated: Date.now(),
+						workspacePath: containerResult.workspacePath,
+						template: containerResult.template,
+						packagesInstalled: containerResult.sdks
+					};
+					await this.saveServerToDB(serverId, config);
+					await this.notifyServerCreated(name);
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Successfully created MCP server '${name}'!\n\n✅ Container ID: ${containerResult.containerId}\n✅ Workspace: ${containerResult.workspacePath}\n✅ Template: ${containerResult.template}\n✅ Base structure ready with McpAgent and Durable Object bindings\n\nNext steps:\n1. Add tools using add_mcp_tool\n2. Optionally add resources using add_mcp_resource\n3. Optionally add prompts using add_mcp_prompt\n4. Deploy using wrangler_deploy`,
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error creating MCP server: ${error instanceof Error ? error.message : String(error)}`,
+							},
+						],
+					};
+				}
 			},
 		);
 
@@ -326,48 +372,133 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 					),
 			},
 			async ({ serverId, toolName, description, parameters, implementation }) => {
-				const config = await this.getServerFromDB(serverId);
-				if (!config) {
+				try {
+					const config = await this.getServerFromDB(serverId);
+					if (!config) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${serverId}' not found. Create it first using init_mcp_server.`,
+								},
+							],
+						};
+					}
+
+					if (!config.container_id) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${serverId}' has no container. Something went wrong during initialization.`,
+								},
+							],
+						};
+					}
+
+					// Generate Zod schema code for parameters
+					const zodParams = Object.entries(parameters)
+						.map(([key, value]: [string, any]) => {
+							let zodType = "z.string()";
+							if (value.type === "number") zodType = "z.number()";
+							if (value.type === "boolean") zodType = "z.boolean()";
+							if (value.type === "array") zodType = "z.array(z.any())";
+							if (value.type === "object") zodType = "z.record(z.any())";
+
+							if (value.description) {
+								zodType += `.describe("${value.description}")`;
+							}
+							if (value.optional) {
+								zodType += ".optional()";
+							}
+							if (value.default !== undefined) {
+								zodType += `.default(${JSON.stringify(value.default)})`;
+							}
+
+							return `${key}: ${zodType}`;
+						})
+						.join(",\n\t\t\t");
+
+					// Generate tool code
+					const toolCode = `// ${description}
+		this.server.tool(
+			"${toolName}",
+			{
+				${zodParams}
+			},
+			async (params) => {
+				try {
+					${implementation}
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: \`Error: \${error instanceof Error ? error.message : String(error)}\`
+						}]
+					};
+				}
+			}
+		);`;
+
+					// Add tool to container via CONTAINER_MANAGER RPC
+					const addResult = await this.env.CONTAINER_MANAGER.addToolToServer(
+						config.container_id,
+						serverId,
+						toolName,
+						toolCode
+					);
+
+					if (!addResult.success) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error adding tool to container: ${addResult.error}`,
+								},
+							],
+						};
+					}
+
+					// Update D1 for tracking
+					const existingIndex = config.tools.findIndex((t) => t.name === toolName);
+					if (existingIndex >= 0) {
+						config.tools[existingIndex] = {
+							name: toolName,
+							description,
+							parameters,
+							implementation,
+						};
+					} else {
+						config.tools.push({
+							name: toolName,
+							description,
+							parameters,
+							implementation,
+						});
+					}
+
+					config.updatedAt = Date.now();
+					await this.saveServerToDB(serverId, config);
+					await this.notifyServerUpdated(config.name);
+
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Error: Server '${serverId}' not found. Create it first using create_mcp_server.`,
+								text: `✅ Successfully ${existingIndex >= 0 ? "updated" : "added"} tool '${toolName}' to server '${serverId}'!\n\n📝 Tool added to container: ${addResult.message}\n\nTool: ${toolName}\nDescription: ${description}\nParameters: ${JSON.stringify(parameters, null, 2)}`,
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error: ${error instanceof Error ? error.message : String(error)}`,
 							},
 						],
 					};
 				}
-
-				// Check if tool already exists
-				const existingIndex = config.tools.findIndex((t) => t.name === toolName);
-				if (existingIndex >= 0) {
-					config.tools[existingIndex] = {
-						name: toolName,
-						description,
-						parameters,
-						implementation,
-					};
-				} else {
-					config.tools.push({
-						name: toolName,
-						description,
-						parameters,
-						implementation,
-					});
-				}
-
-				config.updatedAt = Date.now();
-				await this.saveServerToDB(serverId, config);
-				await this.notifyServerUpdated(config.name);
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Successfully ${existingIndex >= 0 ? "updated" : "added"} tool '${toolName}' to server '${serverId}'!\n\nTool: ${toolName}\nDescription: ${description}\nParameters: ${JSON.stringify(parameters, null, 2)}`,
-						},
-					],
-				};
 			},
 		);
 
@@ -385,49 +516,111 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 					.describe("JavaScript code to generate the resource content (returns string)"),
 			},
 			async ({ serverId, uri, name, description, mimeType, implementation }) => {
-				const config = await this.getServerFromDB(serverId);
-				if (!config) {
+				try {
+					const config = await this.getServerFromDB(serverId);
+					if (!config) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${serverId}' not found.`,
+								},
+							],
+						};
+					}
+
+					if (!config.container_id) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${serverId}' has no container.`,
+								},
+							],
+						};
+					}
+
+					// Generate resource code
+					const resourceCode = `// ${description}
+		this.server.resource(
+			"${uri}",
+			async () => {
+				try {
+					const content = ${implementation};
+					return {
+						contents: [{
+							uri: "${uri}",
+							name: "${name}",
+							mimeType: "${mimeType}",
+							text: content
+						}]
+					};
+				} catch (error) {
+					throw new Error(\`Failed to generate resource: \${error instanceof Error ? error.message : String(error)}\`);
+				}
+			}
+		);`;
+
+					// Add resource to container via CONTAINER_MANAGER RPC
+					const addResult = await this.env.CONTAINER_MANAGER.addResourceToServer(
+						config.container_id,
+						serverId,
+						resourceCode
+					);
+
+					if (!addResult.success) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error adding resource to container: ${addResult.error}`,
+								},
+							],
+						};
+					}
+
+					// Update D1 for tracking
+					const existingIndex = config.resources.findIndex((r) => r.uri === uri);
+					if (existingIndex >= 0) {
+						config.resources[existingIndex] = {
+							uri,
+							name,
+							description,
+							mimeType,
+							implementation,
+						};
+					} else {
+						config.resources.push({
+							uri,
+							name,
+							description,
+							mimeType,
+							implementation,
+						});
+					}
+
+					config.updatedAt = Date.now();
+					await this.saveServerToDB(serverId, config);
+					await this.notifyServerUpdated(config.name);
+
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Error: Server '${serverId}' not found.`,
+								text: `✅ Successfully ${existingIndex >= 0 ? "updated" : "added"} resource '${name}' to server '${serverId}'!\n\n📝 Resource added to container: ${addResult.message}\n\nURI: ${uri}\nName: ${name}\nMIME Type: ${mimeType}`,
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error: ${error instanceof Error ? error.message : String(error)}`,
 							},
 						],
 					};
 				}
-
-				const existingIndex = config.resources.findIndex((r) => r.uri === uri);
-				if (existingIndex >= 0) {
-					config.resources[existingIndex] = {
-						uri,
-						name,
-						description,
-						mimeType,
-						implementation,
-					};
-				} else {
-					config.resources.push({
-						uri,
-						name,
-						description,
-						mimeType,
-						implementation,
-					});
-				}
-
-				config.updatedAt = Date.now();
-				await this.saveServerToDB(serverId, config);
-				await this.notifyServerUpdated(config.name);
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Successfully ${existingIndex >= 0 ? "updated" : "added"} resource '${name}' to server '${serverId}'!`,
-						},
-					],
-				};
 			},
 		);
 
@@ -455,47 +648,120 @@ export class MetaMCP extends McpAgent<Env, MetaMCPState> {
 					),
 			},
 			async ({ serverId, promptName, description, arguments: args, template }) => {
-				const config = await this.getServerFromDB(serverId);
-				if (!config) {
+				try {
+					const config = await this.getServerFromDB(serverId);
+					if (!config) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${serverId}' not found.`,
+								},
+							],
+						};
+					}
+
+					if (!config.container_id) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error: Server '${serverId}' has no container.`,
+								},
+							],
+						};
+					}
+
+					// Generate prompt arguments definition
+					const argsDefinition = args.length > 0
+						? args.map(arg => `{
+							name: "${arg.name}",
+							description: "${arg.description}",
+							required: ${arg.required}
+						}`).join(',\n\t\t\t')
+						: '';
+
+					// Generate prompt code
+					const promptCode = `// ${description}
+		this.server.prompt(
+			"${promptName}",
+			${argsDefinition ? `[${argsDefinition}]` : '[]'},
+			async (args) => {
+				try {
+					// Replace template placeholders with argument values
+					let result = \`${template}\`;
+					${args.map(arg => `if (args.${arg.name}) result = result.replace(/\\{\\{${arg.name}\\}\\}/g, args.${arg.name});`).join('\n\t\t\t\t\t')}
+
+					return {
+						messages: [{
+							role: "user",
+							content: { type: "text", text: result }
+						}]
+					};
+				} catch (error) {
+					throw new Error(\`Failed to generate prompt: \${error instanceof Error ? error.message : String(error)}\`);
+				}
+			}
+		);`;
+
+					// Add prompt to container via CONTAINER_MANAGER RPC
+					const addResult = await this.env.CONTAINER_MANAGER.addPromptToServer(
+						config.container_id,
+						serverId,
+						promptCode
+					);
+
+					if (!addResult.success) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Error adding prompt to container: ${addResult.error}`,
+								},
+							],
+						};
+					}
+
+					// Update D1 for tracking
+					const existingIndex = config.prompts.findIndex((p) => p.name === promptName);
+					if (existingIndex >= 0) {
+						config.prompts[existingIndex] = {
+							name: promptName,
+							description,
+							arguments: args,
+							template,
+						};
+					} else {
+						config.prompts.push({
+							name: promptName,
+							description,
+							arguments: args,
+							template,
+						});
+					}
+
+					config.updatedAt = Date.now();
+					await this.saveServerToDB(serverId, config);
+					await this.notifyServerUpdated(config.name);
+
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Error: Server '${serverId}' not found.`,
+								text: `✅ Successfully ${existingIndex >= 0 ? "updated" : "added"} prompt '${promptName}' to server '${serverId}'!\n\n📝 Prompt added to container: ${addResult.message}\n\nPrompt: ${promptName}\nDescription: ${description}\nArguments: ${args.length}`,
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error: ${error instanceof Error ? error.message : String(error)}`,
 							},
 						],
 					};
 				}
-
-				const existingIndex = config.prompts.findIndex((p) => p.name === promptName);
-				if (existingIndex >= 0) {
-					config.prompts[existingIndex] = {
-						name: promptName,
-						description,
-						arguments: args,
-						template,
-					};
-				} else {
-					config.prompts.push({
-						name: promptName,
-						description,
-						arguments: args,
-						template,
-					});
-				}
-
-				config.updatedAt = Date.now();
-				await this.saveServerToDB(serverId, config);
-				await this.notifyServerUpdated(config.name);
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Successfully ${existingIndex >= 0 ? "updated" : "added"} prompt '${promptName}' to server '${serverId}'!`,
-						},
-					],
-				};
 			},
 		);
 
@@ -809,7 +1075,7 @@ ${config.tools.map((t: any) => `- ${t.name}: ${t.description}`).join('\n') || 'N
 ## Next Steps
 ${deploymentStatus === 'active' ?
 	'1. Use connect_external_mcp to test the connection\n2. Use call_mcp_tool to invoke tools' :
-	'1. Deploy the server using deploy_mcp_server\n2. Check status with get_mcp_server_details'
+	'1. Deploy the server using wrangler_deploy\n2. Check status with get_mcp_server_details'
 }`.trim();
 
 				return {
@@ -1147,149 +1413,66 @@ ${deploymentStatus === 'active' ?
 			},
 		);
 
-		// Tool 15: Deploy MCP server end-to-end
+		// Tool 15: Deploy MCP server using Wrangler
 		this.server.tool(
-			"deploy_mcp_server",
+			"wrangler_deploy",
 			{
-				name: z.string().describe("Server name (e.g., 'weather-api')"),
-				description: z.string().describe("Server description"),
-				tools: z.array(z.object({
-					name: z.string(),
-					description: z.string(),
-					inputSchema: z.record(z.any()),
-					handler: z.string().describe("TypeScript code for the handler function")
-				})).describe("Array of tool definitions")
+				serverId: z.string().describe("ID of the MCP server to deploy")
 			},
-			async ({ name, description, tools }) => {
+			async ({ serverId }) => {
 				try {
-					const serverId = nanoid();
-					const workerName = `mcp-${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`;
-
-					// 1. Create record in mcp_servers
-					await this.env.DB.prepare(`
-						INSERT INTO mcp_servers (
-							id, name, version, description, status, created_at, updated_at, wrangler_config
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-					`).bind(
-						serverId,
-						name,
-						'1.0.0',
-						description,
-						'creating',
-						Date.now(),
-						Date.now(),
-						JSON.stringify({
-							name: workerName,
-							compatibility_date: '2025-03-10',
-							compatibility_flags: ['nodejs_compat']
-						})
-					).run();
-
-					// 2. Store tools in database
-					for (const tool of tools) {
-						await this.env.DB.prepare(`
-							INSERT INTO mcp_tools (server_id, name, description, parameters, implementation, created_at, handler_code)
-							VALUES (?, ?, ?, ?, ?, ?, ?)
-						`).bind(
-							serverId,
-							tool.name,
-							tool.description,
-							JSON.stringify(tool.inputSchema),
-							'', // Legacy field
-							Date.now(),
-							tool.handler
-						).run();
+					// Get server config from D1
+					const config = await this.getServerFromDB(serverId);
+					if (!config) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error: Server '${serverId}' not found. Create it first using init_mcp_server.`
+							}]
+						};
 					}
 
-					// 3. Create SDK environment in container
-					await this.env.DB.prepare(`
-						UPDATE mcp_servers SET status = 'building' WHERE id = ?
-					`).bind(serverId).run();
-
-					const containerResult = await this.env.CONTAINER_MANAGER.createSDKEnvironment(
-						serverId,
-						['@modelcontextprotocol/sdk', 'agents', 'zod']
-					);
-
-					if (!containerResult.success) {
-						throw new Error('Failed to create SDK environment: ' + containerResult.error);
+					if (!config.container_id) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error: Server '${serverId}' has no container. Something went wrong during initialization.`
+							}]
+						};
 					}
 
-					// 4. Generate MCP server code (simplified inline version)
-					const toolsCode = tools.map(tool => `
-						{
-							name: "${tool.name}",
-							description: "${tool.description}",
-							inputSchema: ${JSON.stringify(tool.inputSchema, null, 2)},
-							handler: ${tool.handler}
-						}
-					`).join(',\n');
+					const workspacePath = config.metadata?.workspacePath || `/workspace/${serverId}`;
+					const workerName = config.wranglerConfig?.name || `mcp-${serverId}`;
 
-					const code = {
-						'index.ts': `
-import { McpAgent } from "agents/mcp";
-import { z } from "zod";
+					// Update status to building
+					config.status = 'building';
+					await this.saveServerToDB(serverId, config);
 
-const tools = [
-	${toolsCode}
-];
-
-export class ${name.replace(/[^a-zA-Z0-9]/g, '')}Server extends McpAgent {
-	name = "${name}";
-	version = "1.0.0";
-	description = "${description}";
-
-	constructor() {
-		super();
-		for (const tool of tools) {
-			this.server.tool(tool.name, tool.inputSchema, tool.handler);
-		}
-	}
-}
-
-export default {
-	async fetch(request: Request, env: any, ctx: ExecutionContext) {
-		const server = new ${name.replace(/[^a-zA-Z0-9]/g, '')}Server();
-		return await server.fetch(request, env, ctx);
-	}
-};
-`,
-						'package.json': `{
-  "name": "${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}",
-  "version": "1.0.0",
-  "description": "${description}",
-  "main": "index.ts",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "agents": "latest",
-    "zod": "^3.22.0"
-  }
-}`,
-						'wrangler.jsonc': `{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "${name.toLowerCase().replace(/[^a-z0-9-]/g, '-')}",
-  "main": "index.ts",
-  "compatibility_date": "2025-03-10",
-  "compatibility_flags": ["nodejs_compat"]
-}`
-					};
-
-					// 5. Build in container
+					// Build MCP server in container (reads from workspace)
 					const buildResult = await this.env.CONTAINER_MANAGER.buildMCPServer(
-						containerResult.containerId,
+						config.container_id,
 						serverId,
-						code
+						{} // Empty - buildMCPServer will read from workspace
 					);
 
 					if (!buildResult.success) {
-						throw new Error('Build failed: ' + buildResult.error);
+						config.status = 'failed';
+						config.metadata = { ...config.metadata, error: buildResult.error };
+						await this.saveServerToDB(serverId, config);
+
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Build failed: ${buildResult.error}`
+							}]
+						};
 					}
 
-					// 6. Deploy via worker-publisher
-					await this.env.DB.prepare(`
-						UPDATE mcp_servers SET status = 'deploying', container_id = ? WHERE id = ?
-					`).bind(containerResult.containerId, serverId).run();
+					// Update status to deploying
+					config.status = 'deploying';
+					await this.saveServerToDB(serverId, config);
 
+					// Deploy via WORKER_PUBLISHER
 					const deployResult = await this.env.WORKER_PUBLISHER.deployFromMetaMCP(
 						serverId,
 						workerName,
@@ -1297,13 +1480,28 @@ export default {
 					);
 
 					if (!deployResult.success) {
-						throw new Error('Deployment failed: ' + deployResult.error);
+						config.status = 'failed';
+						config.metadata = { ...config.metadata, error: deployResult.error };
+						await this.saveServerToDB(serverId, config);
+
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Deployment failed: ${deployResult.error}`
+							}]
+						};
 					}
 
-					// 7. Update final status
-					await this.env.DB.prepare(`
-						UPDATE mcp_servers SET status = 'active', worker_name = ?, updated_at = ? WHERE id = ?
-					`).bind(workerName, Date.now(), serverId).run();
+					// Update final status to active
+					config.status = 'active';
+					config.metadata = {
+						...config.metadata,
+						deployedAt: Date.now(),
+						deploymentUrl: deployResult.deploymentUrl,
+						workerName
+					};
+					config.updatedAt = Date.now();
+					await this.saveServerToDB(serverId, config);
 
 					return {
 						content: [{
@@ -1313,9 +1511,11 @@ export default {
 Server ID: ${serverId}
 Worker Name: ${workerName}
 Deployment URL: ${deployResult.deploymentUrl}
-Tools: ${tools.map(t => t.name).join(', ')}
+Tools: ${config.tools.length}
+Resources: ${config.resources.length}
+Prompts: ${config.prompts.length}
 
-Use connect_to_mcp_server to connect and test it.`
+🔗 Connect using: ${deployResult.deploymentUrl}/sse`
 						}]
 					};
 				} catch (error) {
@@ -1329,49 +1529,7 @@ Use connect_to_mcp_server to connect and test it.`
 			}
 		);
 
-		// Tool 16: Create SDK environment using ContainerManagerRPC
-		this.server.tool(
-			"create_sdk_environment",
-			{
-				serverId: z.string().describe("Server ID for the environment"),
-				packages: z.array(z.string()).default(['@modelcontextprotocol/sdk', 'agents', 'zod']).describe("NPM packages to install")
-			},
-			async ({ serverId, packages }) => {
-				try {
-					const result = await this.env.CONTAINER_MANAGER.createSDKEnvironment(serverId, packages);
-
-					if (!result.success) {
-						return {
-							content: [{
-								type: "text",
-								text: `Failed to create SDK environment: ${result.error}`
-							}]
-						};
-					}
-
-					return {
-						content: [{
-							type: "text",
-							text: `✅ SDK environment created!
-
-Container ID: ${result.containerId}
-Packages installed: ${packages.join(', ')}
-
-Use this container for building MCP servers.`
-						}]
-					};
-				} catch (error) {
-					return {
-						content: [{
-							type: "text",
-							text: `Error: ${error instanceof Error ? error.message : String(error)}`
-						}]
-					};
-				}
-			}
-		);
-
-		// Tool 17: Connect to external MCP server using MCPClientRPC
+		// Tool 16: Connect to external MCP server using MCPClientRPC
 		this.server.tool(
 			"connect_external_mcp",
 			{
