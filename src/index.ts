@@ -2512,7 +2512,8 @@ export class ${this.toPascalCase(config.name)} extends McpAgent {
 		version: "${config.version}",
 	});
 
-	async init() {${toolImplementations}${resourceImplementations}${promptImplementations}
+	async init() {
+${toolImplementations}${resourceImplementations}${promptImplementations}
 	}
 }
 
