@@ -1586,17 +1586,6 @@ Use call_mcp_tool to invoke tools from this server.`
 			},
 			async ({ containerId, image, env, workdir }) => {
 				try {
-					// Validate container exists
-					const container = this.env.MY_CONTAINER.get(containerId);
-					if (!container) {
-						return {
-							content: [{
-								type: "text",
-								text: `Error: Container '${containerId}' not found. Create it first using init_mcp_server.`
-							}]
-						};
-					}
-
 					// Set up environment with optimizations
 					const defaultEnv = {
 						PYTHONUNBUFFERED: "1",
@@ -1617,7 +1606,8 @@ Use call_mcp_tool to invoke tools from this server.`
 						node --version 2>/dev/null || echo "Node not available"
 					`.trim();
 
-					const result = await container.execCommand(setupCmd);
+					// Execute via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, setupCmd, 30000);
 
 					if (!result.success) {
 						return {
@@ -1689,23 +1679,10 @@ Reason: This command matches a dangerous pattern that could harm the system.`
 						}
 					}
 
-					const container = this.env.MY_CONTAINER.get(containerId);
-					if (!container) {
-						return {
-							content: [{
-								type: "text",
-								text: `Error: Container '${containerId}' not found.`
-							}]
-						};
-					}
-
 					const startTime = Date.now();
-					const result = await Promise.race([
-						container.execCommand(args),
-						new Promise<{ success: false; output: string }>((_, reject) =>
-							setTimeout(() => reject(new Error(`Command timed out after ${timeout}ms`)), timeout)
-						)
-					]);
+
+					// Execute via CONTAINER_MANAGER RPC with timeout
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, args, timeout);
 
 					const duration = Date.now() - startTime;
 
@@ -1781,21 +1758,11 @@ Paths must:
 						};
 					}
 
-					const container = this.env.MY_CONTAINER.get(containerId);
-					if (!container) {
-						return {
-							content: [{
-								type: "text",
-								text: `Error: Container '${containerId}' not found.`
-							}]
-						};
-					}
-
 					// Create parent directories if needed
 					if (createDirs) {
 						const dir = path.substring(0, path.lastIndexOf("/"));
 						if (dir && dir !== "/workspace") {
-							const mkdirResult = await container.execCommand(`mkdir -p "${dir}"`);
+							const mkdirResult = await this.env.CONTAINER_MANAGER.execCommand(containerId, `mkdir -p "${dir}"`, 10000);
 							if (!mkdirResult.success) {
 								return {
 									content: [{
@@ -1807,8 +1774,8 @@ Paths must:
 						}
 					}
 
-					// Write file
-					const result = await container.writeFile(path, text);
+					// Write file via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.writeFile(containerId, path, text);
 
 					if (!result.success) {
 						return {
@@ -1864,22 +1831,13 @@ ${size > 1024 * 1024 ? "⚠️ Large file detected. Consider using chunking for 
 						};
 					}
 
-					const container = this.env.MY_CONTAINER.get(containerId);
-					if (!container) {
-						return {
-							content: [{
-								type: "text",
-								text: `Error: Container '${containerId}' not found.`
-							}]
-						};
-					}
-
 					// Auto-detect encoding for images
 					const imageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
 					const isImage = imageExtensions.some(ext => path.toLowerCase().endsWith(ext));
 					const actualEncoding = isImage ? "base64" : (encoding || "utf-8");
 
-					const result = await container.readFile(path);
+					// Read file via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.readFile(containerId, path);
 
 					if (!result.success) {
 						return {
@@ -1933,22 +1891,13 @@ ${result.content.length > 5000 ? result.content.substring(0, 5000) + "\n\n... (t
 			},
 			async ({ containerId, path, recursive, maxDepth, filter }) => {
 				try {
-					const container = this.env.MY_CONTAINER.get(containerId);
-					if (!container) {
-						return {
-							content: [{
-								type: "text",
-								text: `Error: Container '${containerId}' not found.`
-							}]
-						};
-					}
-
 					// Build ls command with options
 					const lsCmd = recursive
 						? `find "${path}" -maxdepth ${maxDepth} -type f ${filter ? `-name "${filter}"` : ""} -ls 2>/dev/null | awk '{print $11 " (" $7 " bytes)"}'`
 						: `ls -lh "${path}" 2>/dev/null | tail -n +2 | awk '{print $9 " (" $5 ")"}'`;
 
-					const result = await container.execCommand(lsCmd);
+					// Execute via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, lsCmd, 15000);
 
 					if (!result.success) {
 						return {
@@ -2034,19 +1983,9 @@ Only files in /workspace can be deleted.`
 						};
 					}
 
-					const container = this.env.MY_CONTAINER.get(containerId);
-					if (!container) {
-						return {
-							content: [{
-								type: "text",
-								text: `Error: Container '${containerId}' not found.`
-							}]
-						};
-					}
-
-					// Check if path exists and is directory
+					// Check if path exists and is directory via CONTAINER_MANAGER RPC
 					const checkCmd = `test -e "${path}" && echo "exists" || echo "not_found"; test -d "${path}" && echo "directory" || echo "file"`;
-					const checkResult = await container.execCommand(checkCmd);
+					const checkResult = await this.env.CONTAINER_MANAGER.execCommand(containerId, checkCmd, 10000);
 
 					if (checkResult.output.includes("not_found")) {
 						if (force) {
@@ -2076,12 +2015,12 @@ Only files in /workspace can be deleted.`
 						};
 					}
 
-					// Execute deletion
+					// Execute deletion via CONTAINER_MANAGER RPC
 					const rmCmd = isDir
 						? `rm -r${force ? "f" : ""} "${path}"`
 						: `rm ${force ? "-f" : ""} "${path}"`;
 
-					const result = await container.execCommand(rmCmd);
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, rmCmd, 15000);
 
 					if (!result.success && !force) {
 						return {
