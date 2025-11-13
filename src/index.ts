@@ -1655,7 +1655,20 @@ Ready to execute commands with container_exec.`
 				streamStderr: z.boolean().optional().default(true).describe("Include stderr in output")
 			},
 			async ({ containerId, args, timeout, streamStderr }) => {
+				console.log(`[container_exec] Called with containerId=${containerId}, args=${args}, timeout=${timeout}`);
+
 				try {
+					console.log(`[container_exec] Checking CONTAINER_MANAGER binding...`);
+					if (!this.env.CONTAINER_MANAGER) {
+						console.error(`[container_exec] CONTAINER_MANAGER binding not found!`);
+						return {
+							content: [{
+								type: "text",
+								text: `❌ FATAL: CONTAINER_MANAGER binding not found in environment!`
+							}]
+						};
+					}
+					console.log(`[container_exec] CONTAINER_MANAGER binding exists`);
 					// Security: Validate command for dangerous patterns
 					const dangerousPatterns = [
 						/rm\s+-rf\s+\/(?!workspace)/,
@@ -1681,10 +1694,26 @@ Reason: This command matches a dangerous pattern that could harm the system.`
 
 					const startTime = Date.now();
 
+					console.log(`[container_exec] Calling CONTAINER_MANAGER.execCommand...`);
+					console.log(`[container_exec] Parameters: containerId=${containerId}, timeout=${timeout}`);
+
 					// Execute via CONTAINER_MANAGER RPC with timeout
-					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, args, timeout);
+					let result;
+					try {
+						result = await this.env.CONTAINER_MANAGER.execCommand(containerId, args, timeout);
+						console.log(`[container_exec] RPC call completed:`, JSON.stringify(result));
+					} catch (rpcError) {
+						console.error(`[container_exec] RPC call failed:`, rpcError);
+						return {
+							content: [{
+								type: "text",
+								text: `❌ RPC Error: ${rpcError instanceof Error ? rpcError.message : String(rpcError)}`
+							}]
+						};
+					}
 
 					const duration = Date.now() - startTime;
+					console.log(`[container_exec] Execution took ${duration}ms`);
 
 					if (!result.success) {
 						return {
@@ -2045,6 +2074,111 @@ ${force ? "Force mode was enabled." : ""}`
 						content: [{
 							type: "text",
 							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 23: Diagnostic - Test Container Manager RPC
+		this.server.tool(
+			"debug_container_manager",
+			{
+				containerId: z.string().optional().describe("Optional container ID to test with"),
+				testMethod: z.enum(["execCommand", "writeFile", "readFile", "createSDKEnvironment", "all"]).optional().default("all").describe("Which RPC method to test")
+			},
+			async ({ containerId, testMethod }) => {
+				const results: string[] = [];
+
+				try {
+					results.push("=== CONTAINER_MANAGER RPC DIAGNOSTIC ===\n");
+
+					// Test 1: Check if binding exists
+					results.push("1. Checking CONTAINER_MANAGER binding...");
+					if (!this.env.CONTAINER_MANAGER) {
+						return {
+							content: [{
+								type: "text",
+								text: "❌ FATAL: CONTAINER_MANAGER binding not found in environment!\n\nCheck wrangler.jsonc configuration."
+							}]
+						};
+					}
+					results.push("   ✅ Binding exists\n");
+
+					// Test 2: Check available methods
+					results.push("2. Checking available methods...");
+					const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(this.env.CONTAINER_MANAGER));
+					results.push(`   Methods found: ${methods.join(", ")}\n`);
+
+					// Test 3: Test createSDKEnvironment (known working method)
+					if (testMethod === "createSDKEnvironment" || testMethod === "all") {
+						results.push("3. Testing createSDKEnvironment (known method)...");
+						try {
+							const testResult = await Promise.race([
+								this.env.CONTAINER_MANAGER.createSDKEnvironment("test-diagnostic", ["zod"]),
+								new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout after 5s")), 5000))
+							]);
+							results.push(`   ✅ Response: ${JSON.stringify(testResult, null, 2)}\n`);
+						} catch (error) {
+							results.push(`   ❌ Error: ${error instanceof Error ? error.message : String(error)}\n`);
+						}
+					}
+
+					// Test 4: Test execCommand
+					if (containerId && (testMethod === "execCommand" || testMethod === "all")) {
+						results.push(`4. Testing execCommand with container ${containerId}...`);
+						try {
+							const testResult = await Promise.race([
+								this.env.CONTAINER_MANAGER.execCommand(containerId, "echo 'test'", 5000),
+								new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout after 6s")), 6000))
+							]);
+							results.push(`   ✅ Response: ${JSON.stringify(testResult, null, 2)}\n`);
+						} catch (error) {
+							results.push(`   ❌ Error: ${error instanceof Error ? error.message : String(error)}\n`);
+						}
+					}
+
+					// Test 5: Test writeFile
+					if (containerId && (testMethod === "writeFile" || testMethod === "all")) {
+						results.push(`5. Testing writeFile with container ${containerId}...`);
+						try {
+							const testResult = await Promise.race([
+								this.env.CONTAINER_MANAGER.writeFile(containerId, "/workspace/test-diagnostic.txt", "test content"),
+								new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout after 6s")), 6000))
+							]);
+							results.push(`   ✅ Response: ${JSON.stringify(testResult, null, 2)}\n`);
+						} catch (error) {
+							results.push(`   ❌ Error: ${error instanceof Error ? error.message : String(error)}\n`);
+						}
+					}
+
+					// Test 6: Test readFile
+					if (containerId && (testMethod === "readFile" || testMethod === "all")) {
+						results.push(`6. Testing readFile with container ${containerId}...`);
+						try {
+							const testResult = await Promise.race([
+								this.env.CONTAINER_MANAGER.readFile(containerId, "/workspace/test-diagnostic.txt"),
+								new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout after 6s")), 6000))
+							]);
+							results.push(`   ✅ Response: ${JSON.stringify(testResult, null, 2)}\n`);
+						} catch (error) {
+							results.push(`   ❌ Error: ${error instanceof Error ? error.message : String(error)}\n`);
+						}
+					}
+
+					results.push("\n=== DIAGNOSTIC COMPLETE ===");
+
+					return {
+						content: [{
+							type: "text",
+							text: results.join("\n")
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Diagnostic failed: ${error instanceof Error ? error.message : String(error)}\n\nPartial results:\n${results.join("\n")}`
 						}]
 					};
 				}
