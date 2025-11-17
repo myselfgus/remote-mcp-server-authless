@@ -95,8 +95,8 @@ nano .env  # or use your preferred editor
 
 **`.env` Contents**:
 ```bash
-# Cloudflare Access (disabled for authless operation)
-CF_ACCESS_ENABLED=false
+# Development environment settings
+# Add any required environment variables here
 
 # Optional: API keys for external services
 # OPENAI_API_KEY=your_key_here
