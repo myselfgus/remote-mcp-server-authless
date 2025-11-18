@@ -959,8 +959,8 @@ Delete /workspace/temp directory recursively in container "cnt-123"
 - Use `list_mcp_servers` to see all servers
 
 **"Unauthorized" or "Access denied"**
-- Check Cloudflare Access is disabled (this is an authless server)
 - Verify API credentials if accessing external services
+- Check service bindings are properly configured
 
 **"Rate limit exceeded"**
 - Wait before making more requests

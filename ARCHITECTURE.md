@@ -10,8 +10,7 @@
 6. [Database Schema](#database-schema)
 7. [Service Bindings](#service-bindings)
 8. [Container Management](#container-management)
-9. [Security Architecture](#security-architecture)
-10. [Performance & Scalability](#performance--scalability)
+9. [Performance & Scalability](#performance--scalability)
 
 ## Overview
 
@@ -951,33 +950,6 @@ interface MCPClientRPC {
    - Memory: 512MB per container
    - Storage: 100MB per container
    - Execution timeout: 300 seconds
-
-## Security Architecture
-
-### Authentication & Authorization
-
-**Cloudflare Access** (Optional):
-- Dashboard-level authentication
-- JWT validation handled by Cloudflare Edge
-- Worker receives pre-authenticated requests
-- No JWT validation needed in Worker code
-
-**Current Configuration** (Authless):
-```typescript
-const accessConfig: CloudflareAccessConfig = {
-  enabled: env.CF_ACCESS_ENABLED !== "false", // Default disabled
-};
-```
-
-**CORS Configuration**:
-```typescript
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, CF-Access-JWT-Assertion",
-  "Access-Control-Max-Age": "86400",
-};
-```
 
 ### Input Validation
 

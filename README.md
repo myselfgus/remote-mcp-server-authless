@@ -169,40 +169,6 @@ curl http://localhost:8787/
 
 Para instruções detalhadas, soluções de problemas e mais opções, veja [test-connection.md](test-connection.md).
 
-## ⚠️ Segurança e Autenticação
-
-Este servidor **NÃO tem autenticação** por design.
-
-### Por que sem autenticação?
-
-Este é um **MCP Remote Server "authless"** (sem autenticação) porque:
-
-1. **Compatibilidade com MCP Remote**: Cloudflare Access e outras soluções OAuth não funcionam com conexões SSE do protocolo MCP
-2. **Clientes MCP não suportam OAuth**: Claude.ai, Playground e outros clientes fazem conexões SSE diretas e não conseguem abrir páginas de login
-3. **Problema técnico**: Autenticação OAuth trava eternamente em "Authenticating..." porque não há callback/redirect
-
-### ⚠️ Importante sobre Cloudflare Access
-
-Se você configurou **Cloudflare Access** no dashboard, você DEVE desabilitá-lo:
-
-1. Acesse https://one.dash.cloudflare.com/
-2. **Access** > **Applications**
-3. Encontre aplicação para `meta-mcp.voither.workers.dev`
-4. Delete ou desabilite a aplicação
-
-**Cloudflare Access impede que clientes MCP conectem!** Veja `CLOUDFLARE_ACCESS_INCOMPATIBILITY.md` para detalhes.
-
-### 🔒 Como adicionar segurança (se necessário)
-
-Se você precisa de autenticação, opções compatíveis com MCP:
-
-1. **API Keys customizadas**: Implemente validação de header `Authorization: Bearer <token>` no código do Worker
-2. **Cloudflare WAF**: Use regras de firewall para restringir por IP/país
-3. **Rate Limiting**: Limite requisições para prevenir abuso
-4. **Private Network**: Use Cloudflare Tunnel para acesso apenas via VPN
-
-**Não use:** Cloudflare Access, OAuth, ou qualquer solução que exija redirects/popups
-
 ## 🚀 Available Tools (22 Total)
 
 The Meta-MCP Server provides 22 powerful tools organized in categories:
@@ -324,32 +290,6 @@ Comprehensive guides for every use case:
 - TypeScript + Zod + MCP SDK
 
 [See detailed architecture →](ARCHITECTURE.md)
-
-## ⚠️ Security & Authentication
-
-This server is **authless by design** for MCP protocol compatibility.
-
-### Why No Authentication?
-
-MCP clients (Claude.ai, Playground) use Server-Sent Events (SSE) which **cannot** handle:
-- OAuth redirects
-- Login popups
-- Interactive authentication
-
-Traditional auth methods **block MCP connections** entirely.
-
-### How to Add Security
-
-For production deployments, use MCP-compatible security:
-
-1. **API Keys**: Custom header validation in Worker code
-2. **Cloudflare WAF**: IP/country restrictions
-3. **Rate Limiting**: Prevent abuse
-4. **Cloudflare Tunnel**: Private network access only
-
-**❌ Don't use**: Cloudflare Access, OAuth, or interactive auth
-
-[See security guide →](ARCHITECTURE.md#security-architecture)
 
 ## 💡 Example: Create a Weather API
 
