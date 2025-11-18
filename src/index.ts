@@ -1575,6 +1575,482 @@ Use call_mcp_tool to invoke tools from this server.`
 				}
 			}
 		);
+
+		// Tool 17: Initialize Container
+		this.server.tool(
+			"container_initialize",
+			{
+				containerId: z.string().describe("Container ID to initialize"),
+				image: z.enum(["python:3.12-slim", "python:3.11-slim", "node:20-alpine", "node:18-alpine", "ubuntu:24.04"]).optional().describe("Container image (default: python:3.12-slim)"),
+				env: z.record(z.string()).optional().describe("Environment variables"),
+				workdir: z.string().optional().describe("Working directory (default: /workspace)")
+			},
+			async ({ containerId, image, env, workdir }) => {
+				try {
+					// Set up environment with optimizations
+					const defaultEnv = {
+						PYTHONUNBUFFERED: "1",
+						TERM: "xterm-256color",
+						...(env || {})
+					};
+
+					const envCommands = Object.entries(defaultEnv)
+						.map(([key, value]) => `export ${key}="${value}"`)
+						.join(" && ");
+
+					// Initialize container with setup commands
+					const setupCmd = `
+						${envCommands} &&
+						cd ${workdir || "/workspace"} &&
+						echo "Container initialized with ${image || "python:3.12-slim"}" &&
+						python3 --version 2>/dev/null || echo "Python not available" &&
+						node --version 2>/dev/null || echo "Node not available"
+					`.trim();
+
+					// Execute via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, setupCmd, 30000);
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error initializing container: ${result.output}`
+							}]
+						};
+					}
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Container initialized successfully!
+
+Container ID: ${containerId}
+Image: ${image || "python:3.12-slim"}
+Working Directory: ${workdir || "/workspace"}
+Environment Variables: ${Object.keys(defaultEnv).length}
+
+Output:
+${result.output}
+
+Ready to execute commands with container_exec.`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 18: Execute Command in Container
+		this.server.tool(
+			"container_exec",
+			{
+				containerId: z.string().describe("Container ID where to execute command"),
+				args: z.string().describe("Command to execute (e.g., 'python3 -c \"print(2+2)\"')"),
+				timeout: z.number().optional().default(30000).describe("Timeout in milliseconds (default: 30000)"),
+				streamStderr: z.boolean().optional().default(true).describe("Include stderr in output")
+			},
+			async ({ containerId, args, timeout, streamStderr }) => {
+				try {
+					// Security: Validate command for dangerous patterns
+					const dangerousPatterns = [
+						/rm\s+-rf\s+\/(?!workspace)/,
+						/:\(\)\{.*\}/,
+						/fork\s*bomb/i,
+						/while\s*true\s*;\s*do/i
+					];
+
+					for (const pattern of dangerousPatterns) {
+						if (pattern.test(args)) {
+							return {
+								content: [{
+									type: "text",
+									text: `⚠️ Security Error: Potentially dangerous command detected and blocked.
+
+Command: ${args}
+
+Reason: This command matches a dangerous pattern that could harm the system.`
+								}]
+							};
+						}
+					}
+
+					const startTime = Date.now();
+
+					// Execute via CONTAINER_MANAGER RPC with timeout
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, args, timeout);
+
+					const duration = Date.now() - startTime;
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Command failed (${duration}ms):
+
+Command: ${args}
+
+Error:
+${result.output}`
+							}]
+						};
+					}
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Command executed successfully (${duration}ms)
+
+Command: ${args}
+
+Output:
+${result.output || "(no output)"}`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 19: Write File in Container
+		this.server.tool(
+			"container_file_write",
+			{
+				containerId: z.string().describe("Container ID"),
+				path: z.string().describe("Absolute path to the file (must be in /workspace)"),
+				text: z.string().describe("Full text content of the file"),
+				encoding: z.enum(["utf-8", "base64"]).optional().default("utf-8").describe("File encoding"),
+				createDirs: z.boolean().optional().default(true).describe("Create parent directories if needed")
+			},
+			async ({ containerId, path, text, encoding, createDirs }) => {
+				try {
+					// Security: Validate path
+					if (path.includes("..") || path.startsWith("/etc") || path.startsWith("/sys") || path.startsWith("/proc")) {
+						return {
+							content: [{
+								type: "text",
+								text: `⚠️ Security Error: Invalid or unsafe path: ${path}
+
+Paths must:
+- Be within /workspace
+- Not contain ".."
+- Not access system directories (/etc, /sys, /proc)`
+							}]
+						};
+					}
+
+					if (!path.startsWith("/workspace") && !path.startsWith("./")) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error: Path must be within /workspace: ${path}`
+							}]
+						};
+					}
+
+					// Create parent directories if needed
+					if (createDirs) {
+						const dir = path.substring(0, path.lastIndexOf("/"));
+						if (dir && dir !== "/workspace") {
+							const mkdirResult = await this.env.CONTAINER_MANAGER.execCommand(containerId, `mkdir -p "${dir}"`, 10000);
+							if (!mkdirResult.success) {
+								return {
+									content: [{
+										type: "text",
+										text: `Error creating parent directories: ${mkdirResult.output}`
+									}]
+								};
+							}
+						}
+					}
+
+					// Write file via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.writeFile(containerId, path, text);
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error writing file: ${result.content}`
+							}]
+						};
+					}
+
+					const size = Buffer.byteLength(text, encoding as BufferEncoding);
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ File written successfully!
+
+Path: ${path}
+Size: ${(size / 1024).toFixed(2)} KB
+Encoding: ${encoding}
+
+${size > 1024 * 1024 ? "⚠️ Large file detected. Consider using chunking for files >1MB." : ""}`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 20: Read File from Container
+		this.server.tool(
+			"container_file_read",
+			{
+				containerId: z.string().describe("Container ID"),
+				path: z.string().describe("Absolute path to file or directory"),
+				encoding: z.enum(["utf-8", "base64"]).optional().describe("File encoding (auto for images)")
+			},
+			async ({ containerId, path, encoding }) => {
+				try {
+					// Security: Validate path
+					if (path.includes("..") || path.startsWith("/etc") || path.startsWith("/proc")) {
+						return {
+							content: [{
+								type: "text",
+								text: `⚠️ Security Error: Invalid or unsafe path: ${path}`
+							}]
+						};
+					}
+
+					// Auto-detect encoding for images
+					const imageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
+					const isImage = imageExtensions.some(ext => path.toLowerCase().endsWith(ext));
+					const actualEncoding = isImage ? "base64" : (encoding || "utf-8");
+
+					// Read file via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.readFile(containerId, path);
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Error reading file: ${result.content}
+
+Path: ${path}
+
+Make sure the file exists and is readable.`
+							}]
+						};
+					}
+
+					const size = Buffer.byteLength(result.content, "utf-8");
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ File read successfully!
+
+Path: ${path}
+Size: ${(size / 1024).toFixed(2)} KB
+Encoding: ${actualEncoding}
+${isImage ? "Type: Image (automatically base64 encoded)" : ""}
+
+Content:
+${result.content.length > 5000 ? result.content.substring(0, 5000) + "\n\n... (truncated, file is too large)" : result.content}`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 21: List Files in Container
+		this.server.tool(
+			"container_files_list",
+			{
+				containerId: z.string().describe("Container ID"),
+				path: z.string().optional().default("/workspace").describe("Directory path"),
+				recursive: z.boolean().optional().default(false).describe("List subdirectories recursively"),
+				maxDepth: z.number().optional().default(2).describe("Maximum recursion depth"),
+				filter: z.string().optional().describe("Filter pattern (supports * and ?)")
+			},
+			async ({ containerId, path, recursive, maxDepth, filter }) => {
+				try {
+					// Build ls command with options
+					const lsCmd = recursive
+						? `find "${path}" -maxdepth ${maxDepth} -type f ${filter ? `-name "${filter}"` : ""} -ls 2>/dev/null | awk '{print $11 " (" $7 " bytes)"}'`
+						: `ls -lh "${path}" 2>/dev/null | tail -n +2 | awk '{print $9 " (" $5 ")"}'`;
+
+					// Execute via CONTAINER_MANAGER RPC
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, lsCmd, 15000);
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error listing files: ${result.output}`
+							}]
+						};
+					}
+
+					const output = result.output.trim();
+					if (!output) {
+						return {
+							content: [{
+								type: "text",
+								text: `📁 Directory is empty: ${path}`
+							}]
+						};
+					}
+
+					const lines = output.split("\n");
+					const fileCount = lines.length;
+
+					return {
+						content: [{
+							type: "text",
+							text: `📁 Files in ${path} (${fileCount} items):
+
+${output}
+
+Options:
+- Recursive: ${recursive}
+- Max Depth: ${maxDepth}
+${filter ? `- Filter: ${filter}` : ""}`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 22: Delete File in Container
+		this.server.tool(
+			"container_file_delete",
+			{
+				containerId: z.string().describe("Container ID"),
+				path: z.string().describe("Path to delete (must be in /workspace)"),
+				recursive: z.boolean().optional().default(false).describe("Delete directories recursively"),
+				force: z.boolean().optional().default(false).describe("Continue on errors")
+			},
+			async ({ containerId, path, recursive, force }) => {
+				try {
+					// Security: Validate path
+					const protectedPaths = ["/", "/etc", "/sys", "/proc", "/usr", "/bin", "/sbin", "/lib", "/boot"];
+
+					if (protectedPaths.some(p => path === p || path.startsWith(p + "/"))) {
+						return {
+							content: [{
+								type: "text",
+								text: `⚠️ Security Error: Cannot delete protected path: ${path}
+
+Protected paths include:
+- System directories (/etc, /sys, /proc, /usr, /bin, /lib)
+- Root directory (/)
+
+Only files in /workspace can be deleted.`
+							}]
+						};
+					}
+
+					if (!path.startsWith("/workspace")) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error: Can only delete files in /workspace: ${path}`
+							}]
+						};
+					}
+
+					// Check if path exists and is directory via CONTAINER_MANAGER RPC
+					const checkCmd = `test -e "${path}" && echo "exists" || echo "not_found"; test -d "${path}" && echo "directory" || echo "file"`;
+					const checkResult = await this.env.CONTAINER_MANAGER.execCommand(containerId, checkCmd, 10000);
+
+					if (checkResult.output.includes("not_found")) {
+						if (force) {
+							return {
+								content: [{
+									type: "text",
+									text: `⚠️ Path does not exist: ${path} (ignored with force=true)`
+								}]
+							};
+						}
+						return {
+							content: [{
+								type: "text",
+								text: `Error: Path does not exist: ${path}`
+							}]
+						};
+					}
+
+					const isDir = checkResult.output.includes("directory");
+
+					if (isDir && !recursive) {
+						return {
+							content: [{
+								type: "text",
+								text: `Error: Cannot delete directory without recursive flag: ${path}`
+							}]
+						};
+					}
+
+					// Execute deletion via CONTAINER_MANAGER RPC
+					const rmCmd = isDir
+						? `rm -r${force ? "f" : ""} "${path}"`
+						: `rm ${force ? "-f" : ""} "${path}"`;
+
+					const result = await this.env.CONTAINER_MANAGER.execCommand(containerId, rmCmd, 15000);
+
+					if (!result.success && !force) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Error deleting ${isDir ? "directory" : "file"}: ${result.output}`
+							}]
+						};
+					}
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Successfully deleted ${isDir ? "directory" : "file"}: ${path}
+
+${recursive ? "All contents were deleted recursively." : ""}
+${force ? "Force mode was enabled." : ""}`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
 	}
 
 	// State update handler
@@ -2037,7 +2513,8 @@ export class ${this.toPascalCase(config.name)} extends McpAgent {
 		version: "${config.version}",
 	});
 
-	async init() {${toolImplementations}${resourceImplementations}${promptImplementations}
+	async init() {
+${toolImplementations}${resourceImplementations}${promptImplementations}
 	}
 }
 
