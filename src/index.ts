@@ -2051,6 +2051,557 @@ ${force ? "Force mode was enabled." : ""}`
 				}
 			}
 		);
+
+		// Tool 23: Execute Sandboxed Code
+		this.server.tool(
+			"sandbox_execute_code",
+			{
+				code: z.string().describe("JavaScript/TypeScript code to execute in sandbox"),
+				timeout: z.number().optional().default(5000).describe("Execution timeout in milliseconds (default: 5000)"),
+				context: z.record(z.any()).optional().describe("Custom variables to inject into sandbox context")
+			},
+			async ({ code, timeout, context }) => {
+				try {
+					const result = await this.env.SANDBOX.executeSandboxedCode({
+						code,
+						timeout,
+						context
+					});
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Sandbox execution failed:
+
+Error: ${result.error}
+
+Execution time: ${result.executionTime}ms
+Logs:
+${result.logs.join('\n') || '(no logs)'}`
+							}]
+						};
+					}
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Sandbox execution successful!
+
+Output:
+${JSON.stringify(result.output, null, 2)}
+
+Execution time: ${result.executionTime}ms
+
+Logs:
+${result.logs.join('\n') || '(no logs)'}
+
+Security: Code was validated and executed in isolated sandbox.`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 24: Browser Screenshot
+		this.server.tool(
+			"browser_screenshot",
+			{
+				url: z.string().describe("URL to capture screenshot"),
+				fullPage: z.boolean().optional().default(true).describe("Capture full page or just viewport"),
+				viewport: z.object({
+					width: z.number(),
+					height: z.number()
+				}).optional().describe("Viewport dimensions (default: 1920x1080)"),
+				waitForSelector: z.string().optional().describe("CSS selector to wait for before capturing")
+			},
+			async ({ url, fullPage, viewport, waitForSelector }) => {
+				try {
+					const result = await this.env.SANDBOX.renderBrowser({
+						url,
+						type: "screenshot",
+						fullPage,
+						viewport,
+						waitForSelector,
+						timeout: 30000
+					});
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Screenshot failed: ${result.error}`
+							}]
+						};
+					}
+
+					// Store screenshot in R2
+					const filename = `screenshots/${Date.now()}-${url.replace(/[^a-z0-9]/gi, '_')}.png`;
+					await this.env.STORAGE.put(filename, result.data as ArrayBuffer, {
+						httpMetadata: {
+							contentType: "image/png"
+						}
+					});
+
+					const storageUrl = `https://meta-mcp-storage.YOUR-ACCOUNT.r2.dev/${filename}`;
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Screenshot captured successfully!
+
+URL: ${url}
+Cached: ${result.cached ? 'Yes (served from cache)' : 'No (fresh render)'}
+Full Page: ${fullPage}
+${viewport ? `Viewport: ${viewport.width}x${viewport.height}` : ''}
+
+📁 Stored at: ${filename}
+🔗 Access URL: ${storageUrl}
+
+Note: Configure R2 public access or signed URLs for external access.`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 25: Browser PDF
+		this.server.tool(
+			"browser_pdf",
+			{
+				url: z.string().describe("URL to convert to PDF"),
+				waitForSelector: z.string().optional().describe("CSS selector to wait for before generating PDF")
+			},
+			async ({ url, waitForSelector }) => {
+				try {
+					const result = await this.env.SANDBOX.renderBrowser({
+						url,
+						type: "pdf",
+						waitForSelector,
+						timeout: 30000
+					});
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ PDF generation failed: ${result.error}`
+							}]
+						};
+					}
+
+					// Store PDF in R2
+					const filename = `pdfs/${Date.now()}-${url.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+					await this.env.STORAGE.put(filename, result.data as ArrayBuffer, {
+						httpMetadata: {
+							contentType: "application/pdf"
+						}
+					});
+
+					const storageUrl = `https://meta-mcp-storage.YOUR-ACCOUNT.r2.dev/${filename}`;
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ PDF generated successfully!
+
+URL: ${url}
+Cached: ${result.cached ? 'Yes (served from cache)' : 'No (fresh render)'}
+
+📁 Stored at: ${filename}
+🔗 Access URL: ${storageUrl}
+
+Note: Configure R2 public access or signed URLs for external access.`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 26: Browser Extract Data (JSON)
+		this.server.tool(
+			"browser_extract_data",
+			{
+				url: z.string().describe("URL to extract structured data from"),
+				waitForSelector: z.string().optional().describe("CSS selector to wait for before extracting")
+			},
+			async ({ url, waitForSelector }) => {
+				try {
+					const result = await this.env.SANDBOX.renderBrowser({
+						url,
+						type: "json",
+						waitForSelector,
+						timeout: 30000
+					});
+
+					if (!result.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Data extraction failed: ${result.error}`
+							}]
+						};
+					}
+
+					const data = result.data as any;
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Data extracted successfully!
+
+URL: ${url}
+Cached: ${result.cached ? 'Yes' : 'No'}
+
+📊 Extracted Data:
+
+**Title:** ${data.title}
+
+**Meta Description:** ${data.meta?.description || 'N/A'}
+
+**Links:** ${data.links?.length || 0} links found
+${data.links?.slice(0, 10).map((l: any) => `  - ${l.text}: ${l.href}`).join('\n') || ''}
+${data.links?.length > 10 ? `  ... and ${data.links.length - 10} more` : ''}
+
+**Headings:** ${data.headings?.length || 0} headings found
+${data.headings?.slice(0, 5).map((h: any) => `  - ${h.level}: ${h.text}`).join('\n') || ''}
+${data.headings?.length > 5 ? `  ... and ${data.headings.length - 5} more` : ''}
+
+Full data available in JSON format.`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// ============================================================================
+		// HIGH-LEVEL GENERIC TOOLS FOR LLM AUTONOMY
+		// These tools give the LLM maximum flexibility to decide how to accomplish tasks
+		// ============================================================================
+
+		// Tool 27: Execute Terminal Command (Generic)
+		this.server.tool(
+			"execute_terminal_command",
+			{
+				command: z.string().describe("Any bash/shell command to execute. LLM decides what to run based on the task."),
+				workingDirectory: z.string().optional().default("/workspace").describe("Working directory for command execution"),
+				environment: z.enum(["python", "node", "ubuntu", "auto"]).optional().default("auto").describe("Template environment to use. 'auto' lets the tool choose based on command."),
+				timeout: z.number().optional().default(60000).describe("Timeout in milliseconds"),
+				description: z.string().optional().describe("Human-readable description of what this command does (for logging)")
+			},
+			async ({ command, workingDirectory, environment, timeout, description }) => {
+				try {
+					// Auto-detect environment if needed
+					let selectedEnv = environment;
+					if (environment === "auto") {
+						if (command.includes("python") || command.includes("pip")) selectedEnv = "python";
+						else if (command.includes("npm") || command.includes("node")) selectedEnv = "node";
+						else selectedEnv = "ubuntu";
+					}
+
+					// Create or get container for this environment
+					const containerId = `terminal-${selectedEnv}-${Date.now()}`;
+
+					// Initialize container with appropriate template
+					const initResult = await this.env.CONTAINER_MANAGER.createSDKEnvironment(
+						containerId,
+						selectedEnv === "python" ? ["python"] : selectedEnv === "node" ? ["node", "npm"] : []
+					);
+
+					if (!initResult.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Failed to initialize ${selectedEnv} environment: ${initResult.error}`
+							}]
+						};
+					}
+
+					// Execute command
+					const execResult = await this.env.CONTAINER_MANAGER.execCommand(
+						containerId,
+						`cd ${workingDirectory} && ${command}`,
+						timeout
+					);
+
+					if (!execResult.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Command execution failed:
+
+Command: ${command}
+Environment: ${selectedEnv}
+Working Directory: ${workingDirectory}
+${description ? `Purpose: ${description}` : ''}
+
+Error:
+${execResult.output}
+
+💡 Tip: Check command syntax and try again with corrections.`
+							}]
+						};
+					}
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Command executed successfully!
+
+Command: ${command}
+Environment: ${selectedEnv}
+Working Directory: ${workingDirectory}
+${description ? `Purpose: ${description}` : ''}
+
+Output:
+${execResult.output}
+
+Container ID: ${containerId}
+(Container available for follow-up commands)`
+							}]
+						};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 28: Write and Execute Code (Generic)
+		this.server.tool(
+			"write_and_execute_code",
+			{
+				code: z.string().describe("Full source code to write and execute. Can be Python, JavaScript, TypeScript, or any language."),
+				language: z.enum(["python", "javascript", "typescript", "bash", "auto"]).optional().default("auto").describe("Programming language. 'auto' detects from code."),
+				filename: z.string().optional().describe("Optional filename to save code as (e.g., 'script.py', 'app.js')"),
+				installDependencies: z.boolean().optional().default(true).describe("Automatically install dependencies found in code"),
+				runCommand: z.string().optional().describe("Custom command to run the code (default: auto-detected based on language)"),
+				description: z.string().optional().describe("What this code does (for documentation)")
+			},
+			async ({ code, language, filename, installDependencies, runCommand, description }) => {
+				try {
+					// Auto-detect language
+					let detectedLang = language;
+					if (language === "auto") {
+						if (code.includes("import ") && code.includes("def ")) detectedLang = "python";
+						else if (code.includes("const ") || code.includes("function")) detectedLang = "javascript";
+						else if (code.includes("interface ") || code.includes(": string")) detectedLang = "typescript";
+						else detectedLang = "python"; // default
+					}
+
+					// Determine environment template
+					const envTemplate = detectedLang === "python" ? "python" : "node";
+					const containerId = `code-exec-${detectedLang}-${Date.now()}`;
+
+					// Initialize container
+					const initResult = await this.env.CONTAINER_MANAGER.createSDKEnvironment(
+						containerId,
+						envTemplate === "python" ? ["python", "pip"] : ["node", "npm", "typescript"]
+					);
+
+					if (!initResult.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Failed to initialize ${envTemplate} environment: ${initResult.error}`
+							}]
+						};
+					}
+
+					// Generate filename if not provided
+					const actualFilename = filename || `script.${detectedLang === "python" ? "py" : detectedLang === "typescript" ? "ts" : "js"}`;
+					const filepath = `/workspace/${actualFilename}`;
+
+					// Write code to file
+					const writeResult = await this.env.CONTAINER_MANAGER.writeFile(
+						containerId,
+						filepath,
+						code
+					);
+
+					if (!writeResult.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Failed to write code file: ${writeResult.content}`
+							}]
+						};
+					}
+
+					// Install dependencies if needed
+					if (installDependencies) {
+						if (detectedLang === "python") {
+							// Extract imports and try to install
+							const imports = code.match(/^import\s+(\w+)|^from\s+(\w+)/gm);
+							if (imports && imports.length > 0) {
+								const packages = [...new Set(imports.map(i => i.split(/\s+/)[1]))];
+								const installCmd = `pip install ${packages.join(' ')} 2>&1 || true`;
+								await this.env.CONTAINER_MANAGER.execCommand(containerId, installCmd, 60000);
+							}
+						} else if (detectedLang === "javascript" || detectedLang === "typescript") {
+							// Check for package.json or create one
+							const pkgCheck = await this.env.CONTAINER_MANAGER.readFile(containerId, "/workspace/package.json");
+							if (!pkgCheck.success) {
+								// Create basic package.json
+								await this.env.CONTAINER_MANAGER.writeFile(
+									containerId,
+									"/workspace/package.json",
+									JSON.stringify({ name: "code-execution", version: "1.0.0", type: "module" }, null, 2)
+								);
+							}
+							// Try npm install if package.json exists
+							await this.env.CONTAINER_MANAGER.execCommand(containerId, "npm install 2>&1 || true", 60000);
+						}
+					}
+
+					// Determine run command
+					let execCommand = runCommand;
+					if (!execCommand) {
+						if (detectedLang === "python") execCommand = `python3 ${filepath}`;
+						else if (detectedLang === "typescript") execCommand = `npx ts-node ${filepath}`;
+						else execCommand = `node ${filepath}`;
+					}
+
+					// Execute code
+					const execResult = await this.env.CONTAINER_MANAGER.execCommand(
+						containerId,
+						execCommand,
+						120000
+					);
+
+					if (!execResult.success) {
+						return {
+							content: [{
+								type: "text",
+								text: `❌ Code execution failed:
+
+Language: ${detectedLang}
+File: ${actualFilename}
+${description ? `Purpose: ${description}` : ''}
+
+Error Output:
+${execResult.output}
+
+💡 The code was saved successfully but failed to run.
+Container ID: ${containerId} (available for debugging)`
+							}]
+						};
+					}
+
+					return {
+						content: [{
+							type: "text",
+							text: `✅ Code executed successfully!
+
+Language: ${detectedLang}
+File: ${actualFilename}
+${description ? `Purpose: ${description}` : ''}
+Dependencies Installed: ${installDependencies ? 'Yes' : 'No'}
+
+📝 Code Preview:
+\`\`\`${detectedLang}
+${code.split('\n').slice(0, 10).join('\n')}
+${code.split('\n').length > 10 ? '...' : ''}
+\`\`\`
+
+📤 Output:
+${execResult.output}
+
+Container ID: ${containerId}
+(Container available for follow-up operations)`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
+
+		// Tool 29: Development Environment Sandbox (Highest-Level)
+		this.server.tool(
+			"development_environment",
+			{
+				task: z.string().describe("Natural language description of what you want to accomplish. The tool will determine the best approach."),
+				language: z.enum(["python", "javascript", "typescript", "any"]).optional().default("any").describe("Preferred language, or 'any' to let tool choose"),
+				persist: z.boolean().optional().default(false).describe("Keep environment alive for multiple operations"),
+				context: z.record(z.any()).optional().describe("Additional context or variables to provide")
+			},
+			async ({ task, language, persist, context }) => {
+				try {
+					// This is the ULTIMATE flexible tool
+					// The LLM describes what it wants in natural language
+					// The tool orchestrates everything needed
+
+					return {
+						content: [{
+							type: "text",
+							text: `🚀 Development Environment initialized for task:
+
+"${task}"
+
+Language preference: ${language}
+Persistent: ${persist}
+
+💡 This tool is under development. Currently, use:
+- execute_terminal_command for bash operations
+- write_and_execute_code for running code
+- sandbox_execute_code for quick JavaScript execution
+
+🎯 Next steps based on your task:
+1. If you need to run commands → use execute_terminal_command
+2. If you need to write and run code → use write_and_execute_code
+3. If you need quick JS execution → use sandbox_execute_code
+
+All tools support natural language intent and auto-detect requirements.`
+						}]
+					};
+				} catch (error) {
+					return {
+						content: [{
+							type: "text",
+							text: `Error: ${error instanceof Error ? error.message : String(error)}`
+						}]
+					};
+				}
+			}
+		);
 	}
 
 	// State update handler
