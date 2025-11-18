@@ -71,6 +71,12 @@
 			"service": "mcp-client",
 			"environment": "production",
 			"entrypoint": "MCPClientRPC"
+		},
+		{
+			"binding": "SANDBOX",
+			"service": "sandbox",
+			"environment": "production",
+			"entrypoint": "Sandbox"
 		}
 	],
 	"observability": {
